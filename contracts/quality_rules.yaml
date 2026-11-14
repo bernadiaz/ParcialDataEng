@@ -1,0 +1,83 @@
+# Reglas de calidad — NYC Yellow Taxi
+# Cada regla: id, descripción, severidad (reject|warn), umbral justificado.
+version: 1
+
+rules:
+  - id: R01
+    name: pickup_outside_file_month
+    severity: reject
+    description: >
+      tpep_pickup_datetime no cae en el año/mes del archivo de origen
+      (source_year / source_month).
+    threshold: "year/month del pickup == mes del archivo"
+    justification: >
+      Un viaje publicado en yellow_tripdata_AAAA-MM debe haberse iniciado
+      en ese mes; fuera de mes indica reloj malo o archivo mal etiquetado.
+
+  - id: R02
+    name: dropoff_before_or_equal_pickup
+    severity: reject
+    description: tpep_dropoff_datetime <= tpep_pickup_datetime.
+    threshold: "dropoff > pickup (estricto)"
+    justification: Duración no positiva es físicamente imposible.
+
+  - id: R03
+    name: trip_distance_out_of_range
+    severity: reject
+    description: trip_distance <= 0 o trip_distance > max_distance_miles.
+    threshold: "0 < distance <= 100 millas (MAX_DISTANCE_MILES)"
+    justification: >
+      P99≈19.7 mi y P99.9≈29 mi en la muestra 2024-03+2025-03; el máximo
+      observado supera 300k mi (error). 100 mi cubre NYC+alrededores con
+      holgura y corta colas absurdas de GPS.
+
+  - id: R04
+    name: negative_total_amount
+    severity: reject
+    description: total_amount < 0.
+    threshold: "total_amount >= 0"
+    justification: Un total negativo no es un cobro válido de viaje.
+
+  - id: R05
+    name: passenger_count_null_or_zero
+    severity: warn
+    description: passenger_count IS NULL o passenger_count = 0.
+    threshold: "passenger_count >= 1"
+    justification: >
+      ~18% de filas en la muestra; frecuente en TLC. No se descarta el viaje
+      (el importe y la ruta pueden ser válidos) → advertencia.
+
+  - id: R06
+    name: unknown_zone
+    severity: reject
+    description: pu_location_id o do_location_id ausente en taxi_zone_lookup.
+    threshold: "ambos LocationID ∈ zonas"
+    justification: Sin zona no se puede enriquecer ni agregar por barrio.
+
+  - id: R07
+    name: exact_duplicate
+    severity: reject
+    description: >
+      Fila idéntica (mismo row_hash de columnas de negocio) aparece más de una vez.
+      Se cuarentenan todas las copias del grupo.
+    threshold: "count(row_hash) == 1"
+    justification: Duplicados exactos inflan conteos e ingresos.
+
+  - id: R08
+    name: tip_inconsistent
+    severity: warn
+    description: tip_amount < 0, o tip_amount > fare_amount con fare_amount > 0.
+    threshold: "tip_amount >= 0 y (fare<=0 o tip <= fare)"
+    justification: >
+      Propinas negativas o mayores que la tarifa son anómalas pero a veces
+      vienen de ajustes; no se descarta el viaje → advertencia.
+
+  - id: R09
+    name: duration_over_8_hours
+    severity: reject
+    description: >
+      Duración (dropoff - pickup) > 480 minutos. Regla propia post-exploración.
+    threshold: "0 < duration_min <= 480"
+    justification: >
+      P99.9 de duración ≈ 110 min en la muestra; >8 h (~3k filas) apunta a
+      errores de reloj/GPS, no a un viaje yellow típico en NYC.

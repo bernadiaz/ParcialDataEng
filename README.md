@@ -78,7 +78,7 @@ Contrato de columnas: [`contracts/yellow_schema.yaml`](contracts/yellow_schema.y
 | 1 | Scaffold Docker + ambientes + estructura | **listo** |
 | 2 | Ingesta idempotente + log | **listo** |
 | 3 | Esquema + normalización | **listo** |
-| 4 | Calidad + cuarentena | pendiente |
+| 4 | Calidad + cuarentena | **listo** |
 | 5 | Transform / dbt / estrella | pendiente |
 | 6 | Preguntas + tests + docs finales | pendiente |
 
@@ -116,8 +116,24 @@ Salida:
 - Staging Hive: `data/staging/yellow/year=*/month=*/part.parquet`
 - Reportes: `data/reports/schema_report_YYYY-MM.{md,csv,json}`
 
+## Calidad (Paso 4)
+
+```bash
+make quality-host ENV=dev MES=2025-03
+make quality-report ENV=dev MES=2025-03
+make show-quarantine ENV=dev
+```
+
+- Reglas versionadas: `contracts/quality_rules.yaml` (R01–R09)
+- Aceptadas: `data/accepted/yellow/year=/month=/`
+- Cuarentena: `data/quarantine/yellow/year=/month=/` + `violated_rules`
+- Advertencias: columna `quality_flags` (no descartan)
+- Reconciliación obligatoria: leídas = aceptadas + cuarentena
+- R03 umbral: **100 mi** (P99≈19.7, P99.9≈29 en la muestra)
+- R09 propia: duración **> 8 h**
+
 ## Limitaciones conocidas
 
-- Etapas calidad/dbt/preguntas aún son stubs.
+- Etapas dbt/preguntas aún son stubs.
 - Airbyte OSS no se levanta en Compose (RAM); en `dev` MinIO + cliente HTTP escriben los mismos paths.
 - Tiempo de ejecución / pico de RAM: se documentan tras la primera corrida real con Parquets TLC.

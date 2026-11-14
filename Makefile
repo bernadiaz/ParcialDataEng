@@ -74,8 +74,12 @@ schema-host: ## Esquema en el host con .venv
 	@test -x .venv/bin/python || (echo "Falta .venv"; exit 1)
 	ENV=$(ENV) MES=$(MES) .venv/bin/python -m src.esquema --mes $(MES)
 
-quality: ## Parte 3: calidad, cuarentena, reconciliación
+quality: ## Parte 3: calidad, cuarentena, reconciliación (Docker)
 	$(_run) python -m src.calidad --mes $(MES)
+
+quality-host: ## Calidad en el host con .venv
+	@test -x .venv/bin/python || (echo "Falta .venv"; exit 1)
+	ENV=$(ENV) MES=$(MES) .venv/bin/python -m src.calidad --mes $(MES)
 
 load-sf: ## Parte 4a: carga a Snowflake (skip en ENV=dev por defecto)
 	$(_run) python -m src.load_snowflake --mes $(MES)
@@ -104,11 +108,18 @@ demo-idempotency: ## Defensa: re-correr ingest y mostrar log
 	@$(MAKE) ingest ENV=$(ENV) MES=$(MES)
 	$(_run) python -c "from pathlib import Path; p=Path('data/control/ingestion_log.csv'); print(p.read_text() if p.exists() else 'log aun no generado')"
 
-show-quarantine: ## Defensa: muestra muestra de cuarentena
-	$(_run) python -c "import duckdb; c=duckdb.connect(); print(c.execute(\"select * from read_parquet('data/quarantine/**/*.parquet') limit 5\").df())"
+show-quarantine: ## Defensa: muestra filas en cuarentena con reglas violadas
+	@.venv/bin/python -c "import duckdb; c=duckdb.connect(); \
+r=c.execute(\"select source_file, violated_rules, trip_distance, total_amount, \
+tpep_pickup_datetime, tpep_dropoff_datetime \
+from read_parquet('data/quarantine/yellow/**/*.parquet', hive_partitioning=true) limit 5\").fetchall(); \
+print('source_file | violated_rules | trip_distance | total_amount | pickup | dropoff'); \
+[print(x) for x in r]"
 
 quality-report: ## Defensa: imprime reporte de calidad del mes
-	@ls -la data/reports/ 2>/dev/null || echo "Aun no hay reportes (correr make quality)"
+	@test -f data/reports/quality_report_$(MES).md \
+		&& cat data/reports/quality_report_$(MES).md \
+		|| echo "Aun no hay reporte (correr make quality-host MES=$(MES))"
 
 clean: ## Limpia artefactos locales (no toca S3/MinIO)
 	rm -rf data/staging data/curated data/quarantine data/reports data/control/*.csv
