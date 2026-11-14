@@ -1,0 +1,42 @@
+# Datos y artefactos locales (el examen exige no versionar data/)
+data/
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.env
+.env.local
+*.duckdb
+*.duckdb.wal
+
+# dbt
+dbt_taxi/target/
+dbt_taxi/dbt_packages/
+dbt_taxi/logs/
+dbt_taxi/profiles.yml
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Docker / MinIO volumes (si se montan fuera de data/)
+.tmp/
+.docker-data/
+
+# Resultados generados (se regeneran con make questions)
+# RESULTADOS.md se versiona vacío/plantilla; sobrescritura local ok
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/

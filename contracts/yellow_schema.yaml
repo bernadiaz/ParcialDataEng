@@ -1,0 +1,146 @@
+# Contrato de esquema destino — Yellow Taxi TLC
+# Versionado: cambios de columnas van aquí, no implícitos en el código.
+version: 1
+table: yellow_trips
+format: parquet
+description: >
+  Esquema unificado para meses 2024+ (con cbd_congestion_fee) y 2024
+  (sin esa columna). Nombres destino en snake_case.
+
+# Política ante drift (documentada también en README):
+# - Columna requerida faltante → falla el pipeline
+# - Columna nueva no contratada → ignore + warning en reporte de esquema
+# - cbd_congestion_fee ausente (p.ej. 2024) → NULL (CBD_FEE_MISSING_STRATEGY=null)
+
+columns:
+  - name: vendor_id
+    type: BIGINT
+    required: true
+    nullable: true
+    source_aliases: [VendorID, vendor_id]
+
+  - name: tpep_pickup_datetime
+    type: TIMESTAMP
+    required: true
+    nullable: false
+    source_aliases: [tpep_pickup_datetime]
+
+  - name: tpep_dropoff_datetime
+    type: TIMESTAMP
+    required: true
+    nullable: false
+    source_aliases: [tpep_dropoff_datetime]
+
+  - name: passenger_count
+    type: DOUBLE
+    required: true
+    nullable: true
+    source_aliases: [passenger_count]
+
+  - name: trip_distance
+    type: DOUBLE
+    required: true
+    nullable: true
+    source_aliases: [trip_distance]
+
+  - name: ratecode_id
+    type: DOUBLE
+    required: true
+    nullable: true
+    source_aliases: [RatecodeID, ratecode_id]
+
+  - name: store_and_fwd_flag
+    type: VARCHAR
+    required: true
+    nullable: true
+    source_aliases: [store_and_fwd_flag]
+
+  - name: pu_location_id
+    type: BIGINT
+    required: true
+    nullable: false
+    source_aliases: [PULocationID, pu_location_id]
+
+  - name: do_location_id
+    type: BIGINT
+    required: true
+    nullable: false
+    source_aliases: [DOLocationID, do_location_id]
+
+  - name: payment_type
+    type: BIGINT
+    required: true
+    nullable: true
+    source_aliases: [payment_type]
+
+  - name: fare_amount
+    type: DOUBLE
+    required: true
+    nullable: true
+    source_aliases: [fare_amount]
+
+  - name: extra
+    type: DOUBLE
+    required: true
+    nullable: true
+    source_aliases: [extra]
+
+  - name: mta_tax
+    type: DOUBLE
+    required: true
+    nullable: true
+    source_aliases: [mta_tax]
+
+  - name: tip_amount
+    type: DOUBLE
+    required: true
+    nullable: true
+    source_aliases: [tip_amount]
+
+  - name: tolls_amount
+    type: DOUBLE
+    required: true
+    nullable: true
+    source_aliases: [tolls_amount]
+
+  - name: improvement_surcharge
+    type: DOUBLE
+    required: true
+    nullable: true
+    source_aliases: [improvement_surcharge]
+
+  - name: total_amount
+    type: DOUBLE
+    required: true
+    nullable: true
+    source_aliases: [total_amount]
+
+  - name: congestion_surcharge
+    type: DOUBLE
+    required: true
+    nullable: true
+    source_aliases: [congestion_surcharge]
+
+  - name: airport_fee
+    type: DOUBLE
+    required: false
+    nullable: true
+    source_aliases: [Airport_fee, airport_fee]
+
+  - name: cbd_congestion_fee
+    type: DOUBLE
+    required: false
+    nullable: true
+    source_aliases: [cbd_congestion_fee]
+    notes: >
+      Presente desde archivos 2025. En 2024 se materializa como NULL
+      (no como 0) para distinguir "sin dato" de "fee = 0".
+
+# Metadatos de linaje agregados por el pipeline (no vienen del TLC)
+lineage_columns:
+  - name: source_file
+    type: VARCHAR
+  - name: source_year
+    type: INTEGER
+  - name: source_month
+    type: INTEGER

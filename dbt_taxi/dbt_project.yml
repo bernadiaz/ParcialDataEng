@@ -1,0 +1,32 @@
+name: dbt_taxi
+version: 1.0.0
+config-version: 2
+profile: dbt_taxi
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  dbt_taxi:
+    +tags: ["project=nyc_taxi"]
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: staging
+      +materialized: ephemeral
+    marts:
+      +schema: marts
+      +materialized: table
+      fact_trips:
+        +materialized: incremental
+        +tags: ["marts", "finops"]
+      agg_zone_hour:
+        +materialized: table
+        +tags: ["marts", "finops"]
+
+vars:
+  mes: "2025-03"
