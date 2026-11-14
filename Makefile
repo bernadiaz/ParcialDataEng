@@ -20,8 +20,8 @@ export ENV MES
 export
 
 .PHONY: help install up down logs shell \
-	ingest schema quality transform model load-sf dbt-run questions all test \
-	ingest-host schema-host quality-host transform-host model-host \
+	ingest schema quality transform model load-sf dbt-run questions all all-host test \
+	ingest-host schema-host quality-host transform-host model-host questions-host \
 	demo-idempotency show-quarantine quality-report clean
 
 help: ## Muestra targets disponibles
@@ -102,8 +102,12 @@ load-sf: ## Carga a Snowflake (skip en ENV=dev por defecto)
 dbt-run: ## dbt en Snowflake (skip si SKIP_DBT=1; en dev usar model-host)
 	$(_run) bash -c 'if [ "$${SKIP_DBT:-0}" = "1" ]; then echo "[skip] dbt (SKIP_DBT=1) — usar make model-host"; else cd dbt_taxi && dbt run --vars "{\"mes\": \"$(MES)\"}"; fi'
 
-questions: ## Parte 5b: preguntas de negocio → RESULTADOS.md
+questions: ## Preguntas de negocio → RESULTADOS.md (Docker)
 	$(_run) python -m src.resultados --mes $(MES)
+
+questions-host: ## Preguntas en el host → RESULTADOS.md
+	@test -x .venv/bin/python || (echo "Falta .venv"; exit 1)
+	ENV=$(ENV) MES=$(MES) .venv/bin/python -m src.resultados --mes $(MES)
 
 all: ## Pipeline: ingest→schema→quality→transform→model→(sf/dbt)→questions
 	@echo "==> all ENV=$(ENV) MES=$(MES)"
@@ -124,7 +128,8 @@ all-host: ## Pipeline completo en el host (dev / 8 GB)
 	@$(MAKE) quality-host ENV=$(ENV) MES=$(MES)
 	@$(MAKE) transform-host ENV=$(ENV) MES=$(MES)
 	@$(MAKE) model-host ENV=$(ENV) MES=$(MES)
-	@echo "==> done (preguntas = Paso 6)"
+	@$(MAKE) questions-host ENV=$(ENV) MES=$(MES)
+	@echo "==> done"
 
 test: ## Tests automatizados (pytest)
 	$(_run) pytest -q

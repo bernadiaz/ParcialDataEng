@@ -1,165 +1,134 @@
 # Pipeline NYC Taxi (examen)
 
-Pipeline batch reproducible: **ingesta → esquema → calidad → carga → dbt → preguntas**.
+Pipeline batch reproducible: **ingesta → esquema → calidad → transform → modelo → preguntas**.
 
-Stack (según plan): **Airbyte → S3 → DuckDB (calidad) → Snowflake + dbt**, orquestado con `make all MES=YYYY-MM`.
+Stack: cliente HTTP (paths tipo Airbyte) → object store → **DuckDB** (esquema/calidad/curated/marts) → opcional **Snowflake + dbt** en `prod`. Orquestación: `make all MES=YYYY-MM` / `make all-host`.
 
-Todo corre **dockerizado**, con ambientes **`dev`** / **`prod`**, pensado para una máquina de **~8 GB RAM**.
+Todo pensado para **~8 GB RAM**, con ambientes **`dev`** / **`prod`**.
 
 ## Ambientes
 
 | | `ENV=dev` (default) | `ENV=prod` |
 |---|---|---|
-| Object store | **`OBJECT_STORE=fs`** → `data/object_store/` (sin MinIO; 8 GB) | **AWS S3** (`OBJECT_STORE=s3`) |
-| Alternativa | `OBJECT_STORE=s3` + MinIO en Docker (si el registry responde) | — |
-| Ingesta | Cliente HTTP ligero (mismos paths Hive que Airbyte) | Airbyte sync o mismo cliente |
-| Calidad / esquema | DuckDB (`memory_limit=2GB`) | Igual |
-| Warehouse | Skip Snowflake/dbt (`SKIP_*=1`) | **Snowflake** + **dbt** |
+| Object store | `OBJECT_STORE=fs` → `data/object_store/` | AWS S3 (`OBJECT_STORE=s3`) |
+| Warehouse analítico | DuckDB `data/warehouse/nyc_taxi.duckdb` | Snowflake + dbt |
+| DuckDB | `memory_limit=2GB`, `threads=2` | igual (calidad local previa) |
 
-Secretos: copiá `.env.example` → `.env` (nunca se versiona).  
-Config no secreta: `environments/dev.env` y `environments/prod.env`.
+Secretos: `.env` (desde `.env.example`). Config: `environments/dev.env`, `environments/prod.env`.
 
 ## Requisitos
 
-- Docker + Docker Compose v2 (**daemon en marcha**: `sudo systemctl start docker`)
-- ~8 GB RAM libres recomendados (límites en `docker/docker-compose.yml`)
-- Credenciales AWS + Snowflake solo para `ENV=prod`
+- Python 3.12+ (se probó con 3.14 + `uv`)
+- ~8 GB RAM
+- Docker opcional (Compose para MinIO/`make all`); en notebook: `make all-host`
+- Credenciales AWS/Snowflake solo para `ENV=prod`
 
 ## Instalación y ejecución
 
 ```bash
 cp .env.example .env
-# opcional: editar .env
+uv venv .venv
+uv pip install duckdb pyyaml boto3 httpx python-dotenv pytest
+# (prod) también: dbt-snowflake
 
-# 1) Infra local (MinIO)
 make up ENV=dev
-
-# 2) Pipeline completo (mes asignado + mismo mes 2024)
-make all ENV=dev MES=2025-03
+make all-host ENV=dev MES=2025-03
 ```
 
-Comandos por etapa: `make ingest|schema|quality|load-sf|dbt-run|questions MES=...`.
-
-Tests: `make test ENV=dev`.
-
-## Arquitectura (resumen)
-
-```
-TLC HTTPS ──► [ingesta] ──► S3/MinIO raw/yellow/year=/month=/
-                              │
-                              ▼
-                         DuckDB esquema + calidad
-                              │
-                    aceptadas / cuarentena / reportes
-                              │
-                    (prod) Snowflake RAW/STAGING
-                              │
-                         dbt marts (estrella)
-                              │
-                         sql/q1..q6 → RESULTADOS.md
-```
-
-Detalle Airbyte: [`airbyte/README_AIRBYTE.md`](airbyte/README_AIRBYTE.md).  
-Contrato de columnas: [`contracts/yellow_schema.yaml`](contracts/yellow_schema.yaml).
-
-## Decisiones clave (parcial — se completa al implementar)
-
-- `cbd_congestion_fee` en 2024 → **NULL** (no 0): distingue “sin columna / sin dato” de “fee cobrado = 0” en 2025.
-- Columna nueva no contratada (p.ej. `month`/`year` del Parquet TLC) → **ignore + warning** en `data/reports/schema_report_*.md`.
-- Columna requerida faltante → **falla** el pipeline.
-- Destino tipado en `contracts/yellow_schema.yaml`; el código solo aplica aliases + CAST.
-- Distancia máxima: candidato **100 mi** (se confirma tras exploración).
-- FinOps Snowflake: warehouse XS, auto-suspend 60s, staging transient, `fact_trips` incremental por mes (detalle al cablear dbt).
-
-## Estado de implementación
-
-| Paso | Contenido | Estado |
-|------|-----------|--------|
-| 1 | Scaffold Docker + ambientes + estructura | **listo** |
-| 2 | Ingesta idempotente + log | **listo** |
-| 3 | Esquema + normalización | **listo** |
-| 4 | Calidad + cuarentena | **listo** |
-| 5 | Transform / dbt / estrella | **listo** |
-| 6 | Preguntas + tests + docs finales | pendiente |
-
-## Declaración de uso de IA
-
-Asistente: **Cursor**. Uso: scaffolding del repo, Docker/ambientes, estructura alineada al plan y a la consigna. El código de cada etapa se revisa y se debe poder explicar en la defensa oral. Commits sin `Co-authored-by` de Cursor.
-
-## Ingesta (Paso 2)
-
-- Destino local (consigna): `data/raw/yellow/year=AAAA/month=MM/` + `data/raw/zones/`
-- Object store (mismos keys Hive):
-  - `OBJECT_STORE=fs` (default `dev`) → `data/object_store/...`
-  - `OBJECT_STORE=s3` (`prod` / opcional) → MinIO o AWS S3
-- Comparación automática: mismo mes del año anterior
-- Idempotencia por SHA-256 (local + store + `ingestion_log`)
-- Reintentos de red: 3 (1s / 2s / 4s); falla → `estado=error` y exit ≠ 0
-- Log: `data/control/ingestion_log.csv`
+Etapas sueltas:
 
 ```bash
-make up ENV=dev
-make ingest-host ENV=dev MES=2025-03   # o: make ingest (Docker)
-# segunda vez → skipped
-make ingest-host ENV=dev MES=2025-03
+make ingest-host schema-host quality-host transform-host model-host questions-host MES=2025-03
 ```
 
-Verificado con `MES=2025-03`: ~4.1M / ~3.6M filas; 2ª corrida en <3s con `estado=skipped`.
+Tests: `.venv/bin/python -m pytest -q`  
+Defensa: `make demo-idempotency`, `make quality-report`, `make show-quarantine`.
 
-## Esquema (Paso 3)
+## Arquitectura
 
-```bash
-make schema-host ENV=dev MES=2025-03
+```
+TLC HTTPS ──► ingesta ──► data/raw + object_store (Hive year=/month=/)
+                              │
+                         DuckDB esquema → staging
+                              │
+                         calidad → accepted / quarantine + reports
+                              │
+                         transform → curated (derivados + zonas)
+                              │
+                    ┌─────────┴─────────┐
+                    ▼                   ▼
+            DuckDB marts (dev)    Snowflake+dbt (prod)
+                    │
+              sql/q* → RESULTADOS.md
 ```
 
-Salida:
-- Staging Hive: `data/staging/yellow/year=*/month=*/part.parquet`
-- Reportes: `data/reports/schema_report_YYYY-MM.{md,csv,json}`
+## Decisiones
 
-## Calidad (Paso 4)
+- `cbd_congestion_fee` en 2024 → **NULL** (no 0).
+- Columna nueva no contratada → ignore + warning; requerida faltante → falla.
+- Distancia máxima **100 mi** (P99≈19.7, P99.9≈29 en muestra 2024-03+2025-03).
+- R05/R08 = warn; R01–R04, R06–R07, R09 = reject (R09: duración > 8 h).
+- Reproceso de mes: replace solo su partición curated (ver `data/reports/partition_replace_*.md`).
+- FinOps (prod): warehouse XS, auto-suspend 60s, staging transient, `fact_trips` incremental.
 
-```bash
-make quality-host ENV=dev MES=2025-03
-make quality-report ENV=dev MES=2025-03
-make show-quarantine ENV=dev
-```
-
-- Reglas versionadas: `contracts/quality_rules.yaml` (R01–R09)
-- Aceptadas: `data/accepted/yellow/year=/month=/`
-- Cuarentena: `data/quarantine/yellow/year=/month=/` + `violated_rules`
-- Advertencias: columna `quality_flags` (no descartan)
-- Reconciliación obligatoria: leídas = aceptadas + cuarentena
-- R03 umbral: **100 mi** (P99≈19.7, P99.9≈29 en la muestra)
-- R09 propia: duración **> 8 h**
-
-## Transformación + modelo (Paso 5)
-
-```bash
-make transform-host ENV=dev MES=2025-03
-make model-host ENV=dev MES=2025-03
-```
-
-**Curated Hive** (`data/curated/yellow/year=/month=/`):
-- `duration_min`, `avg_speed_mph`, `pickup_date`, `pickup_hour`, `pickup_dow`, `tip_pct`
-- Enrich: `pu_borough`, `pu_zone`, `do_borough`, `do_zone`
-- Reproceso de un mes: solo reemplaza su partición (ver `data/reports/partition_replace_*.md`)
-
-**Modelo estrella** (`data/warehouse/nyc_taxi.duckdb`):
+### Granularidad del modelo
 
 | Tabla | Granularidad |
 |-------|----------------|
-| `marts.dim_zone` | 1 fila por `LocationID` |
-| `marts.dim_date` | 1 fila por fecha de pickup |
-| `marts.fact_trips` | 1 fila por viaje curado |
+| `marts.dim_zone` | 1 fila / LocationID |
+| `marts.dim_date` | 1 fila / fecha pickup |
+| `marts.fact_trips` | 1 fila / viaje curado |
 | `marts.agg_zone_hour` | zona origen × fecha × hora |
 
-DataGrip: New Data Source → DuckDB → archivo `data/warehouse/nyc_taxi.duckdb`.
+## Cómo mirar los datos
 
-En `ENV=prod`: `load-sf` + `dbt-run` sobre Snowflake (modelos en `dbt_taxi/`).
+| Qué | Dónde |
+|-----|--------|
+| Reportes | `data/reports/*.md` |
+| Log ingesta | `data/control/ingestion_log.csv` |
+| Parquets | `data/raw`, `staging`, `accepted`, `quarantine`, `curated` |
+| Modelo | `data/warehouse/nyc_taxi.duckdb` → **DataGrip/DBeaver (DuckDB)** |
+| Respuestas negocio | `RESULTADOS.md` |
 
-## Limitaciones conocidas
+pgAdmin no aplica (no hay Postgres).
 
-- Preguntas de negocio (q1–q6 / RESULTADOS.md) = Paso 6.
-- dbt/Snowflake activos solo con `ENV=prod` y credenciales.
-- Airbyte OSS no se levanta en Compose (RAM); en `dev` MinIO + cliente HTTP escriben los mismos paths.
-- Tiempo de ejecución / pico de RAM: se documentan tras la primera corrida real con Parquets TLC.
+## Preguntas (Paso 6)
+
+```bash
+make questions-host ENV=dev MES=2025-03
+```
+
+SQL versionado en `sql/q1_…` … `q6_…` (+ `q3b_…`). Salida: `RESULTADOS.md`.
+
+## Rendimiento observado (máquina de desarrollo, `MES=2025-03`)
+
+| Etapa | Orden de magnitud |
+|-------|-------------------|
+| Ingesta (2 Parquets + zonas) | ~40–60 s red |
+| Esquema | ~10 s |
+| Calidad | ~45–50 s |
+| Transform (×2 si reproceso) | ~20–40 s |
+| Modelo DuckDB | ~1–2 min |
+| Pico DuckDB | `memory_limit=2GB` configurado |
+
+## Estado
+
+| Paso | Estado |
+|------|--------|
+| 1 Scaffold Docker + ambientes | listo |
+| 2 Ingesta idempotente | listo |
+| 3 Esquema | listo |
+| 4 Calidad + cuarentena | listo |
+| 5 Transform + estrella | listo |
+| 6 Preguntas + docs | listo |
+
+## Declaración de uso de IA
+
+Asistente: **Cursor**. Uso: scaffold, Docker/ambientes, módulos de pipeline, SQL de preguntas y documentación alineada al plan/consigna. El código debe poder explicarse en la defensa; commits sin `Co-authored-by` de Cursor.
+
+## Limitaciones
+
+- Airbyte OSS no se levanta en Compose (RAM); `dev` usa cliente HTTP + `OBJECT_STORE=fs`.
+- Snowflake/dbt solo con `ENV=prod` y credenciales.
+- Interpretaciones en `RESULTADOS.md` son borrador para oral: conviene personalizarlas.
+- Imágenes MinIO en Docker Hub pueden fallar según registry; por eso el default `fs`.
