@@ -8,8 +8,9 @@ Airbyte OSS (abctl / platform) suele pedir **varios GB de RAM**. Este repo debe 
 
 | Ambiente | Ingesta |
 |----------|---------|
-| `ENV=dev` | Cliente ligero Python (`src/ingesta_airbyte.py`) → **MinIO** (mismos paths que Airbyte) |
-| `ENV=prod` | Airbyte sync real → **AWS S3**, o el mismo cliente si `AIRBYTE_ENABLED=false` |
+| `ENV=dev` + `OBJECT_STORE=fs` | Cliente HTTP → `data/raw` + `data/object_store` (sin MinIO; 8 GB) |
+| `ENV=dev` + `OBJECT_STORE=s3` | Cliente HTTP → MinIO Docker (mismos paths Hive) |
+| `ENV=prod` | Airbyte sync → **AWS S3**, o el mismo cliente si `AIRBYTE_ENABLED=false` |
 
 Los paths de destino son idénticos en ambos casos para que DuckDB no cambie.
 

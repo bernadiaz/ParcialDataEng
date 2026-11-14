@@ -31,10 +31,17 @@ help: ## Muestra targets disponibles
 install: ## Instala deps en el host (opcional; preferir Docker)
 	python3 -m pip install -e ".[dev]"
 
-up: ## Levanta infra Docker del ambiente (dev: MinIO)
+up: ## Prepara ambiente (dev fs: dirs; dev s3: MinIO Docker si hay imagen)
 	@test -f .env || cp .env.example .env
-	$(COMPOSE) $(PROFILE) up -d minio minio-init
-	@echo "MinIO listo. Consola http://localhost:9001 (dev)."
+	@mkdir -p data/raw/yellow data/raw/zones data/control data/object_store
+	@if [ "$${OBJECT_STORE:-fs}" = "s3" ] || grep -q '^OBJECT_STORE=s3' environments/$(ENV).env 2>/dev/null; then \
+		echo "OBJECT_STORE=s3 → levantando MinIO…"; \
+		$(COMPOSE) $(PROFILE) up -d minio minio-init; \
+		echo "MinIO listo. Consola http://localhost:9001"; \
+	else \
+		echo "OBJECT_STORE=fs → data/object_store listo (sin MinIO; ideal 8 GB)."; \
+		echo "Para MinIO: OBJECT_STORE=s3 make up ENV=$(ENV)"; \
+	fi
 
 down: ## Baja contenedores del ambiente
 	$(COMPOSE) $(PROFILE) down
@@ -52,11 +59,20 @@ _run = $(COMPOSE) $(PROFILE) run --rm --entrypoint "" \
 	--env-file $(ENV_FILE) \
 	pipeline
 
-ingest: ## Parte 1: ingesta (mes + mes 2024 + zonas)
+ingest: ## Parte 1: ingesta (mes + mes 2024 + zonas) vía Docker
 	$(_run) python -m src.ingesta_airbyte --mes $(MES)
 
-schema: ## Parte 2: contrato de esquema + normalización
+ingest-host: ## Ingesta en el host con .venv (sin build Docker)
+	@test -f .env || cp .env.example .env
+	@test -x .venv/bin/python || (echo "Creá .venv: uv venv && uv pip install -e '.[dev]'"; exit 1)
+	ENV=$(ENV) MES=$(MES) .venv/bin/python -m src.ingesta_airbyte --mes $(MES)
+
+schema: ## Parte 2: contrato de esquema + normalización (Docker)
 	$(_run) python -m src.esquema --mes $(MES)
+
+schema-host: ## Esquema en el host con .venv
+	@test -x .venv/bin/python || (echo "Falta .venv"; exit 1)
+	ENV=$(ENV) MES=$(MES) .venv/bin/python -m src.esquema --mes $(MES)
 
 quality: ## Parte 3: calidad, cuarentena, reconciliación
 	$(_run) python -m src.calidad --mes $(MES)

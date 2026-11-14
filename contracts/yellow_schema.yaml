@@ -32,7 +32,7 @@ columns:
     source_aliases: [tpep_dropoff_datetime]
 
   - name: passenger_count
-    type: DOUBLE
+    type: BIGINT
     required: true
     nullable: true
     source_aliases: [passenger_count]
@@ -44,7 +44,7 @@ columns:
     source_aliases: [trip_distance]
 
   - name: ratecode_id
-    type: DOUBLE
+    type: BIGINT
     required: true
     nullable: true
     source_aliases: [RatecodeID, ratecode_id]

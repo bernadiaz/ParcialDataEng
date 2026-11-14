@@ -70,6 +70,7 @@ services:
     environment:
       ENV: ${ENV:-dev}
       MES: ${MES:-2025-03}
+      DATA_DIR: /app/data
     mem_limit: 3g
     mem_reservation: 1g
     cpus: 2.0

@@ -29,9 +29,11 @@ dbt_taxi/profiles.yml
 *.swp
 .DS_Store
 
-# Docker / MinIO volumes (si se montan fuera de data/)
+# Docker / MinIO / tools locales
 .tmp/
 .docker-data/
+.tools/
+.venv/
 
 # Resultados generados (se regeneran con make questions)
 # RESULTADOS.md se versiona vacío/plantilla; sobrescritura local ok

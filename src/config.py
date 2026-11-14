@@ -62,6 +62,7 @@ class Settings:
     s3_path_style: bool
     s3_raw_prefix: str
     s3_control_prefix: str
+    object_store: str
     duckdb_threads: int
     duckdb_memory_limit: str
     max_distance_miles: float
@@ -93,7 +94,15 @@ def get_settings(mes: str | None = None) -> Settings:
     env_name = os.getenv("ENV", os.getenv("APP_ENV", "dev")).strip().lower()
     _load_dotenv_files(env_name)
 
-    data_dir = Path(os.getenv("DATA_DIR", str(ROOT / "data"))).resolve()
+    raw_data_dir = os.getenv("DATA_DIR")
+    if raw_data_dir:
+        data_dir = Path(raw_data_dir)
+        # Si el env apunta a /app/data pero no estamos en el contenedor, usar ./data
+        if str(data_dir) == "/app/data" and not Path("/.dockerenv").exists():
+            data_dir = ROOT / "data"
+        data_dir = data_dir.resolve()
+    else:
+        data_dir = (ROOT / "data").resolve()
 
     return Settings(
         env=env_name,
@@ -108,6 +117,10 @@ def get_settings(mes: str | None = None) -> Settings:
         s3_path_style=_bool(os.getenv("S3_PATH_STYLE"), default=env_name == "dev"),
         s3_raw_prefix=os.getenv("S3_RAW_PREFIX", "raw"),
         s3_control_prefix=os.getenv("S3_CONTROL_PREFIX", "control"),
+        object_store=os.getenv(
+            "OBJECT_STORE",
+            "fs" if env_name == "dev" else "s3",
+        ).strip().lower(),
         duckdb_threads=int(os.getenv("DUCKDB_THREADS", "2")),
         duckdb_memory_limit=os.getenv("DUCKDB_MEMORY_LIMIT", "2GB"),
         max_distance_miles=float(os.getenv("MAX_DISTANCE_MILES", "100")),
