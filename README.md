@@ -126,9 +126,31 @@ SQL versionado en `sql/q1_…` … `q6_…` (+ `q3b_…`). Salida: `RESULTADOS.m
 
 Asistente: **Cursor**. Uso: scaffold, Docker/ambientes, módulos de pipeline, SQL de preguntas y documentación alineada al plan/consigna. El código debe poder explicarse en la defensa; commits sin `Co-authored-by` de Cursor.
 
+## Monitoreo (Prometheus + Grafana)
+
+Perfil Docker aparte (~800 MB) para no saturar 8 GB si no lo necesitás.
+
+```bash
+make up-monitoring
+make metrics-push MES=2025-03   # lee reports + warehouse → Pushgateway
+```
+
+| Servicio | URL |
+|----------|-----|
+| Grafana | http://localhost:3000 (`admin` / `admin`) |
+| Prometheus | http://localhost:9090 |
+| Pushgateway | http://localhost:9091 |
+
+Dashboard provisionado: **NYC Taxi → NYC Taxi Pipeline** (filas, cuarentena, reglas, éxito/duración por etapa, fact_trips).
+
+`make all-host` intenta `metrics-push` al final (no falla si el stack no está arriba).
+
+Bajar: `make down-monitoring`.
+
 ## Limitaciones
 
 - Airbyte OSS no se levanta en Compose (RAM); `dev` usa cliente HTTP + `OBJECT_STORE=fs`.
 - Snowflake/dbt solo con `ENV=prod` y credenciales.
 - Interpretaciones en `RESULTADOS.md` son borrador para oral: conviene personalizarlas.
 - Imágenes MinIO en Docker Hub pueden fallar según registry; por eso el default `fs`.
+- Monitoreo requiere Docker (imágenes `prom/*` y `grafana/grafana`).

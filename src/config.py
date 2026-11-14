@@ -71,6 +71,8 @@ class Settings:
     skip_snowflake: bool
     skip_dbt: bool
     airbyte_enabled: bool
+    metrics_enabled: bool
+    pushgateway_url: str | None
     snowflake_account: str | None
     snowflake_user: str | None
     snowflake_warehouse: str | None
@@ -129,6 +131,8 @@ def get_settings(mes: str | None = None) -> Settings:
         skip_snowflake=_bool(os.getenv("SKIP_SNOWFLAKE"), default=env_name == "dev"),
         skip_dbt=_bool(os.getenv("SKIP_DBT"), default=env_name == "dev"),
         airbyte_enabled=_bool(os.getenv("AIRBYTE_ENABLED"), default=False),
+        metrics_enabled=_bool(os.getenv("METRICS_ENABLED"), default=True),
+        pushgateway_url=os.getenv("PUSHGATEWAY_URL", "http://localhost:9091"),
         snowflake_account=os.getenv("SNOWFLAKE_ACCOUNT"),
         snowflake_user=os.getenv("SNOWFLAKE_USER"),
         snowflake_warehouse=os.getenv("SNOWFLAKE_WAREHOUSE", "WH_TAXI_RUN"),

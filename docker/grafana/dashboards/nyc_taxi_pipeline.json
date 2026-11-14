@@ -1,0 +1,131 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Filas leídas (calidad)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "nyc_taxi_quality_rows_read",
+          "legendFormat": "{{mes}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Filas aceptadas",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "nyc_taxi_quality_rows_accepted",
+          "legendFormat": "{{mes}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Filas en cuarentena",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "nyc_taxi_quality_rows_quarantine",
+          "legendFormat": "{{mes}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Fact trips (modelo)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "nyc_taxi_fact_trips",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Éxito por etapa (1=ok)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "nyc_taxi_stage_success",
+          "legendFormat": "{{stage}} / {{mes}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Duración por etapa (s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "nyc_taxi_stage_duration_seconds",
+          "legendFormat": "{{stage}} / {{mes}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Violaciones por regla de calidad",
+      "type": "bargauge",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "nyc_taxi_quality_rule_violations",
+          "legendFormat": "{{rule_id}} {{mes}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "horizontal",
+        "displayMode": "gradient"
+      }
+    },
+    {
+      "title": "Ingesta por archivo (ok=1 skipped=2 error=0)",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "nyc_taxi_ingest_last_status",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["nyc_taxi", "pipeline"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "title": "NYC Taxi Pipeline",
+  "uid": "nyc-taxi-pipeline",
+  "version": 1
+}

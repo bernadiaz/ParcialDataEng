@@ -22,6 +22,7 @@ export
 .PHONY: help install up down logs shell \
 	ingest schema quality transform model load-sf dbt-run questions all all-host test \
 	ingest-host schema-host quality-host transform-host model-host questions-host \
+	up-monitoring down-monitoring metrics-push \
 	demo-idempotency show-quarantine quality-report clean
 
 help: ## Muestra targets disponibles
@@ -46,6 +47,23 @@ up: ## Prepara ambiente (dev fs: dirs; dev s3: MinIO Docker si hay imagen)
 
 down: ## Baja contenedores del ambiente
 	$(COMPOSE) $(PROFILE) down
+
+up-monitoring: ## Prometheus + Pushgateway + Grafana (~800 MB)
+	@test -f .env || cp .env.example .env
+	$(COMPOSE) --profile monitoring up -d pushgateway prometheus grafana
+	@echo ""
+	@echo "Prometheus:  http://localhost:9090"
+	@echo "Pushgateway: http://localhost:9091"
+	@echo "Grafana:     http://localhost:3000  (admin/admin)"
+	@echo "Dashboard:   NYC Taxi → NYC Taxi Pipeline"
+	@echo "Luego: make metrics-push MES=$(MES)"
+
+down-monitoring: ## Baja stack de monitoreo
+	$(COMPOSE) --profile monitoring down
+
+metrics-push: ## Pushea métricas de reports/warehouse a Pushgateway
+	@test -x .venv/bin/python || (echo "Falta .venv"; exit 1)
+	ENV=$(ENV) MES=$(MES) .venv/bin/python -m src.metrics --mes $(MES) --push-reports
 
 logs: ## Logs de servicios Docker
 	$(COMPOSE) $(PROFILE) logs -f --tail=100
@@ -129,6 +147,7 @@ all-host: ## Pipeline completo en el host (dev / 8 GB)
 	@$(MAKE) transform-host ENV=$(ENV) MES=$(MES)
 	@$(MAKE) model-host ENV=$(ENV) MES=$(MES)
 	@$(MAKE) questions-host ENV=$(ENV) MES=$(MES)
+	-@$(MAKE) metrics-push ENV=$(ENV) MES=$(MES)
 	@echo "==> done"
 
 test: ## Tests automatizados (pytest)

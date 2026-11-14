@@ -40,6 +40,8 @@ def _settings(tmp_path: Path) -> Settings:
         skip_snowflake=True,
         skip_dbt=True,
         airbyte_enabled=False,
+        metrics_enabled=False,
+        pushgateway_url=None,
         snowflake_account=None,
         snowflake_user=None,
         snowflake_warehouse=None,
