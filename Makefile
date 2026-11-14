@@ -20,7 +20,8 @@ export ENV MES
 export
 
 .PHONY: help install up down logs shell \
-	ingest schema quality load-sf dbt-run questions all test \
+	ingest schema quality transform model load-sf dbt-run questions all test \
+	ingest-host schema-host quality-host transform-host model-host \
 	demo-idempotency show-quarantine quality-report clean
 
 help: ## Muestra targets disponibles
@@ -81,24 +82,49 @@ quality-host: ## Calidad en el host con .venv
 	@test -x .venv/bin/python || (echo "Falta .venv"; exit 1)
 	ENV=$(ENV) MES=$(MES) .venv/bin/python -m src.calidad --mes $(MES)
 
-load-sf: ## Parte 4a: carga a Snowflake (skip en ENV=dev por defecto)
+transform: ## Parte 4: curated Hive + derivados + zonas (Docker)
+	$(_run) python -m src.transform --mes $(MES)
+
+transform-host: ## Transform en el host con .venv
+	@test -x .venv/bin/python || (echo "Falta .venv"; exit 1)
+	ENV=$(ENV) MES=$(MES) .venv/bin/python -m src.transform --mes $(MES)
+
+model: ## Parte 5a: modelo estrella DuckDB (Docker)
+	$(_run) python -m src.modelo --mes $(MES)
+
+model-host: ## Modelo estrella en el host → data/warehouse/nyc_taxi.duckdb
+	@test -x .venv/bin/python || (echo "Falta .venv"; exit 1)
+	ENV=$(ENV) MES=$(MES) .venv/bin/python -m src.modelo --mes $(MES)
+
+load-sf: ## Carga a Snowflake (skip en ENV=dev por defecto)
 	$(_run) python -m src.load_snowflake --mes $(MES)
 
-dbt-run: ## Parte 4b-5: dbt transform + modelo estrella
-	$(_run) bash -c 'if [ "$${SKIP_DBT:-0}" = "1" ]; then echo "[skip] dbt (SKIP_DBT=1)"; else cd dbt_taxi && dbt run --vars "{\"mes\": \"$(MES)\"}"; fi'
+dbt-run: ## dbt en Snowflake (skip si SKIP_DBT=1; en dev usar model-host)
+	$(_run) bash -c 'if [ "$${SKIP_DBT:-0}" = "1" ]; then echo "[skip] dbt (SKIP_DBT=1) — usar make model-host"; else cd dbt_taxi && dbt run --vars "{\"mes\": \"$(MES)\"}"; fi'
 
-questions: ## Parte 5: preguntas de negocio → RESULTADOS.md
+questions: ## Parte 5b: preguntas de negocio → RESULTADOS.md
 	$(_run) python -m src.resultados --mes $(MES)
 
-all: ## Pipeline completo: ingest→schema→quality→load→dbt→questions
+all: ## Pipeline: ingest→schema→quality→transform→model→(sf/dbt)→questions
 	@echo "==> all ENV=$(ENV) MES=$(MES)"
 	@$(MAKE) ingest ENV=$(ENV) MES=$(MES)
 	@$(MAKE) schema ENV=$(ENV) MES=$(MES)
 	@$(MAKE) quality ENV=$(ENV) MES=$(MES)
+	@$(MAKE) transform ENV=$(ENV) MES=$(MES)
+	@$(MAKE) model ENV=$(ENV) MES=$(MES)
 	@$(MAKE) load-sf ENV=$(ENV) MES=$(MES)
 	@$(MAKE) dbt-run ENV=$(ENV) MES=$(MES)
 	@$(MAKE) questions ENV=$(ENV) MES=$(MES)
 	@echo "==> done"
+
+all-host: ## Pipeline completo en el host (dev / 8 GB)
+	@echo "==> all-host ENV=$(ENV) MES=$(MES)"
+	@$(MAKE) ingest-host ENV=$(ENV) MES=$(MES)
+	@$(MAKE) schema-host ENV=$(ENV) MES=$(MES)
+	@$(MAKE) quality-host ENV=$(ENV) MES=$(MES)
+	@$(MAKE) transform-host ENV=$(ENV) MES=$(MES)
+	@$(MAKE) model-host ENV=$(ENV) MES=$(MES)
+	@echo "==> done (preguntas = Paso 6)"
 
 test: ## Tests automatizados (pytest)
 	$(_run) pytest -q

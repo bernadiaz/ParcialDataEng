@@ -79,7 +79,7 @@ Contrato de columnas: [`contracts/yellow_schema.yaml`](contracts/yellow_schema.y
 | 2 | Ingesta idempotente + log | **listo** |
 | 3 | Esquema + normalización | **listo** |
 | 4 | Calidad + cuarentena | **listo** |
-| 5 | Transform / dbt / estrella | pendiente |
+| 5 | Transform / dbt / estrella | **listo** |
 | 6 | Preguntas + tests + docs finales | pendiente |
 
 ## Declaración de uso de IA
@@ -132,8 +132,34 @@ make show-quarantine ENV=dev
 - R03 umbral: **100 mi** (P99≈19.7, P99.9≈29 en la muestra)
 - R09 propia: duración **> 8 h**
 
+## Transformación + modelo (Paso 5)
+
+```bash
+make transform-host ENV=dev MES=2025-03
+make model-host ENV=dev MES=2025-03
+```
+
+**Curated Hive** (`data/curated/yellow/year=/month=/`):
+- `duration_min`, `avg_speed_mph`, `pickup_date`, `pickup_hour`, `pickup_dow`, `tip_pct`
+- Enrich: `pu_borough`, `pu_zone`, `do_borough`, `do_zone`
+- Reproceso de un mes: solo reemplaza su partición (ver `data/reports/partition_replace_*.md`)
+
+**Modelo estrella** (`data/warehouse/nyc_taxi.duckdb`):
+
+| Tabla | Granularidad |
+|-------|----------------|
+| `marts.dim_zone` | 1 fila por `LocationID` |
+| `marts.dim_date` | 1 fila por fecha de pickup |
+| `marts.fact_trips` | 1 fila por viaje curado |
+| `marts.agg_zone_hour` | zona origen × fecha × hora |
+
+DataGrip: New Data Source → DuckDB → archivo `data/warehouse/nyc_taxi.duckdb`.
+
+En `ENV=prod`: `load-sf` + `dbt-run` sobre Snowflake (modelos en `dbt_taxi/`).
+
 ## Limitaciones conocidas
 
-- Etapas dbt/preguntas aún son stubs.
+- Preguntas de negocio (q1–q6 / RESULTADOS.md) = Paso 6.
+- dbt/Snowflake activos solo con `ENV=prod` y credenciales.
 - Airbyte OSS no se levanta en Compose (RAM); en `dev` MinIO + cliente HTTP escriben los mismos paths.
 - Tiempo de ejecución / pico de RAM: se documentan tras la primera corrida real con Parquets TLC.
