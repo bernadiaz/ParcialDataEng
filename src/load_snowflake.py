@@ -23,7 +23,7 @@ from typing import Any
 import duckdb
 
 from src import esquema
-from src.config import RUN_ID, Month, Settings, connect_duckdb_file, get_logger, track_step
+from src.config import RUN_ID, Month, Settings, connect_duckdb_file, duckdb_config, get_logger, track_step
 from src.ingesta_airbyte import sha256_file
 from src.observability import push
 
@@ -63,7 +63,7 @@ def zones_columns() -> list[tuple[str, str]]:
 
 
 def parquet_rows(path: Path) -> int:
-    with duckdb.connect() as con:
+    with duckdb.connect(config=duckdb_config()) as con:
         return con.execute(f"SELECT count(*) FROM read_parquet('{path.as_posix()}')").fetchone()[0]
 
 

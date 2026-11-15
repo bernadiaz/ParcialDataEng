@@ -52,9 +52,82 @@ def _normalize_path_variables() -> None:
     data_dir = resolve_path(os.environ.get("DATA_DIR", "").strip() or "data")
     os.environ.setdefault("DAGSTER_HOME", str(data_dir / "dagster_home"))
     os.environ.setdefault("DUCKDB_WAREHOUSE_PATH", str(data_dir / "warehouse" / "nyc_taxi.duckdb"))
+    os.environ.setdefault("DUCKDB_TEMP_DIRECTORY", str(data_dir / "tmp" / "duckdb"))
 
 
 _normalize_path_variables()
+
+
+# --- memory budget (laptops with 8 GB of RAM and up) -------------------------------------------------------------
+GIB = 1024**3
+
+
+def memory_total_bytes() -> int:
+    """RAM this process may use: the machine's RAM, or the cgroup limit when it is lower (Linux
+    containers, systemd slices). psutil alone reports the host's RAM inside a container."""
+    total = 8 * GIB
+    try:
+        import psutil
+
+        total = psutil.virtual_memory().total
+    except Exception:  # pragma: no cover - psutil is a dependency; keep a safe default anyway
+        pass
+    for limit_file in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            raw = Path(limit_file).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if raw.isdigit() and 0 < int(raw) < total:
+            total = int(raw)
+        break
+    return total
+
+
+def resolve_memory_limit(value: str, total_bytes: int | None = None) -> str:
+    """DUCKDB_MEMORY_LIMIT: a DuckDB size (2GB, 1536MiB...) or auto (default).
+
+    auto = a quarter of the RAM, between 1 GiB and 4 GiB: 2 GiB on an 8 GB laptop, 4 GiB from 16 GB.
+    DuckDB only counts its buffers, so the process peaks somewhat higher, and it spills to
+    DUCKDB_TEMP_DIRECTORY instead of failing when a step needs more."""
+    value = (value or "").strip()
+    if value and value.lower() != "auto":
+        return value
+    total = memory_total_bytes() if total_bytes is None else total_bytes
+    limit = min(4 * GIB, max(1 * GIB, total // 4))
+    return f"{limit // 2**20}MiB"
+
+
+def resolve_threads(value: str, cpus: int | None = None) -> int:
+    """DUCKDB_THREADS: a number or auto (default) = the CPU count, at most 4 (more threads, more RAM)."""
+    value = (value or "").strip()
+    if value and value.lower() != "auto":
+        return max(1, int(value))
+    return max(1, min(4, cpus if cpus is not None else (os.cpu_count() or 2)))
+
+
+# Resolved once and exported, so dbt (its DuckDB profile reads them) and every DuckDB connection of
+# the pipeline share the same budget.
+os.environ["DUCKDB_MEMORY_LIMIT"] = resolve_memory_limit(os.environ.get("DUCKDB_MEMORY_LIMIT", ""))
+os.environ["DUCKDB_THREADS"] = str(resolve_threads(os.environ.get("DUCKDB_THREADS", "")))
+
+
+def duckdb_config(*, in_memory: bool = True) -> dict[str, str]:
+    """Settings for every DuckDB connection of the pipeline.
+
+    In-memory connections spill to DUCKDB_TEMP_DIRECTORY (DuckDB's default would be ./.tmp in the
+    working directory, i.e. inside the repository). A database file already spills to <file>.tmp next
+    to itself in DATA_DIR, and DuckDB refuses to switch a temp directory it has used, so file
+    connections leave it alone."""
+    config = {
+        "memory_limit": resolve_memory_limit(os.environ.get("DUCKDB_MEMORY_LIMIT", "")),
+        "threads": str(resolve_threads(os.environ.get("DUCKDB_THREADS", ""))),
+        "preserve_insertion_order": "false",
+    }
+    if in_memory:
+        temp = Path(os.environ["DUCKDB_TEMP_DIRECTORY"])
+        temp.mkdir(parents=True, exist_ok=True)
+        config["temp_directory"] = temp.as_posix()
+    return config
 
 CONTRACTS_DIR = ROOT / "contracts"
 SQL_DIR = ROOT / "sql"
@@ -167,8 +240,8 @@ class Settings:
             aws_region=_env("AWS_REGION", "us-east-1"),
             s3_bucket=_env("S3_BUCKET"),
             s3_raw_prefix=_env("S3_RAW_PREFIX", "raw").strip("/"),
-            duckdb_memory_limit=_env("DUCKDB_MEMORY_LIMIT", "2GB"),
-            duckdb_threads=int(_env("DUCKDB_THREADS", "4")),
+            duckdb_memory_limit=resolve_memory_limit(_env("DUCKDB_MEMORY_LIMIT")),
+            duckdb_threads=resolve_threads(_env("DUCKDB_THREADS")),
         )
 
     @property
@@ -280,11 +353,12 @@ CONTROL_DDL = (
 
 
 def connect_duckdb_file(path: Path, *, read_only: bool = False, attempts: int = 8) -> duckdb.DuckDBPyConnection:
-    """Opens a DuckDB file, retrying briefly when another process (sync client, antivirus) holds it."""
+    """Opens a DuckDB file with the pipeline's memory budget (duckdb_config), retrying briefly when
+    another process (sync client, antivirus) holds it."""
     path.parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(1, attempts + 1):
         try:
-            return duckdb.connect(str(path), read_only=read_only)
+            return duckdb.connect(str(path), read_only=read_only, config=duckdb_config(in_memory=False))
         except duckdb.IOException:
             if attempt == attempts:
                 raise

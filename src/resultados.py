@@ -20,7 +20,7 @@ from typing import Any
 import duckdb
 import yaml
 
-from src.config import ROOT, RUN_ID, SQL_DIR, Month, Settings, get_logger, track_step
+from src.config import ROOT, RUN_ID, SQL_DIR, Month, Settings, connect_duckdb_file, get_logger, track_step
 
 log = get_logger("resultados")
 OUTPUT = ROOT / "RESULTADOS.md"
@@ -180,7 +180,7 @@ def replace_block(text: str, block: str) -> str | None:
 
 def open_connection(settings: Settings) -> Any:
     if settings.warehouse == "duckdb":
-        return duckdb.connect(str(settings.warehouse_db), read_only=True)
+        return connect_duckdb_file(settings.warehouse_db, read_only=True)
     from src.load_snowflake import snowflake_connect
 
     return snowflake_connect(step="questions")

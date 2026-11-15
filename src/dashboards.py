@@ -25,12 +25,13 @@ from urllib.parse import urlparse
 
 import httpx
 
-from src.config import Month, Settings, get_logger, loopback
+from src.config import Month, Settings, duckdb_config, get_logger, loopback
 
 log = get_logger("superset")
 MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 ASSIGNED_COLOR, COMPARISON_COLOR = "#1A85A0", "#B2B2B2"
 DEFAULT_URL = "http://localhost:8090"
+SUPERSET_DUCKDB_MEMORY = "512MB"  # per query budget of the offline copy inside the Superset container
 
 
 def superset_url() -> str:
@@ -148,7 +149,7 @@ def export_bi_copy(settings: Settings) -> Path:
     tmp = target.with_suffix(".tmp.duckdb")
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp.unlink(missing_ok=True)
-    con = duckdb.connect()
+    con = duckdb.connect(config=duckdb_config())
     con.execute("SET disabled_compression_methods = 'dict_fsst'")
     con.execute(f"ATTACH '{settings.warehouse_db.as_posix()}' AS wh (READ_ONLY)")
     con.execute(f"ATTACH '{tmp.as_posix()}' AS bi (STORAGE_VERSION 'v1.3.0')")
@@ -176,7 +177,10 @@ def database_payload(settings: Settings) -> tuple[dict[str, Any], str]:
             "database_name": "NYC Taxi (DuckDB offline copy)",
             "sqlalchemy_uri": "duckdb:////app/data/bi/nyc_taxi_bi.duckdb",
             "expose_in_sqllab": True,
-            "extra": json.dumps({"engine_params": {"connect_args": {"read_only": True}}}),
+            # DuckDB inside Superset would take 80% of the Docker VM's RAM by default; the container
+            # has a 1.5 GiB limit (docker-compose.yml), so its queries get a fixed budget.
+            "extra": json.dumps({"engine_params": {"connect_args": {
+                "read_only": True, "config": {"memory_limit": SUPERSET_DUCKDB_MEMORY, "threads": "2"}}}}),
         }, "marts"
     env = os.environ
     key_file = env.get("SUPERSET_SNOWFLAKE_KEY_FILE", "").strip()

@@ -18,7 +18,7 @@ from typing import Any
 
 import duckdb
 
-from src.config import ROOT, Month, Settings, get_logger
+from src.config import ROOT, Month, Settings, duckdb_config, get_logger
 
 log = get_logger("demos")
 
@@ -43,7 +43,7 @@ def _warehouse_counts(settings: Settings) -> dict[str, int]:
     if settings.warehouse == "duckdb":
         if not settings.warehouse_db.exists():
             return counts
-        con = duckdb.connect(str(settings.warehouse_db), read_only=True)
+        con = duckdb.connect(str(settings.warehouse_db), read_only=True, config=duckdb_config(in_memory=False))
         run = lambda sql: con.execute(sql).fetchall()  # noqa: E731
     else:
         from src.load_snowflake import snowflake_connect
@@ -67,7 +67,7 @@ def _warehouse_counts(settings: Settings) -> dict[str, int]:
 
 
 def counts(settings: Settings, label: str, compare: str | None) -> int:
-    con = duckdb.connect()
+    con = duckdb.connect(config=duckdb_config())
     snapshot: dict[str, Any] = {}
     snapshot |= _parquet_counts(con, settings.curated_dir / "yellow", "curated")
     snapshot |= _parquet_counts(con, settings.quarantine_dir / "yellow", "quarantine")
@@ -98,7 +98,7 @@ def show_quarantine(settings: Settings, month: Month) -> int:
     if not path.exists():
         print(f"No quarantine for {month}: run `make quality MES={month}` first")
         return 1
-    con = duckdb.connect()
+    con = duckdb.connect(config=duckdb_config())
     rows = con.execute(
         f"""WITH q AS (SELECT *, unnest(string_split(violated_rules, ';')) AS rule_id FROM read_parquet('{path.as_posix()}'))
             SELECT rule_id, count(*) OVER (PARTITION BY rule_id) AS rows_with_rule, violated_rules, source_file, source_row_number,

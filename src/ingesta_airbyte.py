@@ -51,6 +51,7 @@ from src.config import (
     Month,
     Settings,
     control_db,
+    duckdb_config,
     get_logger,
     track_step,
 )
@@ -111,7 +112,7 @@ def sha256_file(path: Path) -> str:
 def count_rows(path: Path) -> int:
     """Parquet: footer metadata (no full read). CSV: data rows."""
     reader = "read_parquet" if path.suffix == ".parquet" else "read_csv"
-    with duckdb.connect() as con:
+    with duckdb.connect(config=duckdb_config()) as con:
         return con.execute(f"SELECT count(*) FROM {reader}('{path.as_posix()}')").fetchone()[0]
 
 
@@ -407,6 +408,15 @@ DISCOVERY_POLL_SECONDS = 30
 ABCTL_CONTAINER = "airbyte-abctl-control-plane"
 
 
+def available_memory_mb() -> int:
+    try:
+        import psutil
+
+        return int(psutil.virtual_memory().available / 2**20)
+    except Exception:  # pragma: no cover - psutil is a dependency
+        return 0
+
+
 def start_local_airbyte(api_url: str) -> float:
     """Starts the abctl control-plane container if the API is local and it is stopped.
 
@@ -422,6 +432,14 @@ def start_local_airbyte(api_url: str) -> float:
             return 0.0
         if state.stdout.strip() == "true":
             return 120.0
+        free_mb = available_memory_mb()
+        needed_mb = int(os.environ.get("AIRBYTE_START_MIN_FREE_MB", "6144"))
+        if free_mb < needed_mb:
+            # abctl's kind cluster takes about 5 GB: on an 8 GB laptop starting it would leave the
+            # pipeline and the stack without memory. The direct path lands the same file instead.
+            log.warning("Airbyte is stopped and only %s MB of RAM are free (it needs about %s MB): not starting "
+                        "it (AIRBYTE_START_MIN_FREE_MB)", f"{free_mb:,}", f"{needed_mb:,}")
+            return 0.0
         log.info("Airbyte is stopped: starting it (docker start %s)", ABCTL_CONTAINER)
         started = subprocess.run(["docker", "start", ABCTL_CONTAINER], capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.SubprocessError):
