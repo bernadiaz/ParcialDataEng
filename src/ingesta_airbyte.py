@@ -31,11 +31,13 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import duckdb
 import httpx
@@ -284,6 +286,16 @@ class AirbyteClient:
             raise IngestionError(f"Airbyte authentication failed: HTTP {response.status_code} {response.text[:200]}")
         return response.json()["access_token"]
 
+    def unavailable_reason(self) -> str:
+        """Empty when the API answers and accepts the credentials; otherwise the reason, for the log."""
+        try:
+            self._token = self._authenticate()
+            return ""
+        except httpx.HTTPError as exc:
+            return f"API unreachable at {self.base_url} ({exc.__class__.__name__})"
+        except (IngestionError, ValueError, KeyError) as exc:
+            return str(exc) or exc.__class__.__name__
+
     def request(self, method: str, path: str, body: dict[str, Any] | None = None,
                 timeout: float | None = None) -> dict[str, Any]:
         for retry_auth in (True, False):
@@ -392,6 +404,31 @@ DISCOVERY_WAIT_SECONDS = 1200
 DISCOVERY_POLL_SECONDS = 30
 
 
+ABCTL_CONTAINER = "airbyte-abctl-control-plane"
+
+
+def start_local_airbyte(api_url: str) -> float:
+    """Starts the abctl control-plane container if the API is local and it is stopped.
+
+    Returns how many seconds to wait for the API: AIRBYTE_START_TIMEOUT (300 s) after starting it,
+    120 s if it was already running (it may still be booting), 0 when there is no local abctl."""
+    host = urlparse(api_url).hostname or ""
+    if host not in {"localhost", "127.0.0.1", "::1"} or not shutil.which("docker"):
+        return 0.0
+    try:
+        state = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", ABCTL_CONTAINER],
+                               capture_output=True, text=True, timeout=30)
+        if state.returncode != 0:  # no abctl install on this machine (or Docker is not running)
+            return 0.0
+        if state.stdout.strip() == "true":
+            return 120.0
+        log.info("Airbyte is stopped: starting it (docker start %s)", ABCTL_CONTAINER)
+        started = subprocess.run(["docker", "start", ABCTL_CONTAINER], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return 0.0
+    return float(os.environ.get("AIRBYTE_START_TIMEOUT", "300")) if started.returncode == 0 else 0.0
+
+
 def _save_ids(ids: dict[str, dict[str, str]]) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(ids, indent=2), encoding="utf-8")
@@ -476,27 +513,63 @@ class Ingestor:
         self.log = IngestionLog(settings)
         self.sleep = sleep
         self.http = http or httpx.Client(timeout=httpx.Timeout(120.0, connect=15.0), follow_redirects=True)
-        if s3 is None and settings.s3_bucket:
+        if s3 is None and settings.s3_bucket and not settings.offline:
             s3 = S3Store(settings)
         self.s3 = s3
-        if settings.ingest_mode in {"airbyte", "hybrid"}:
-            if self.s3 is None:
-                raise IngestionError(f"INGEST_MODE={settings.ingest_mode} needs S3_BUCKET (and the AWS profile) in .env")
-            self.airbyte = airbyte or AirbyteClient(
-                os.environ.get("AIRBYTE_API_URL", ""), os.environ.get("AIRBYTE_CLIENT_ID", ""),
-                os.environ.get("AIRBYTE_CLIENT_SECRET", ""),
-            )
-        else:
-            self.airbyte = airbyte
+        if settings.ingest_mode in {"airbyte", "hybrid"} and self.s3 is None:
+            raise IngestionError(f"INGEST_MODE={settings.ingest_mode} needs S3_BUCKET (and the AWS profile) in .env")
+        # The Airbyte client is created (and checked) the first time a dataset really needs a sync, so a
+        # month that is already ingested never depends on Airbyte being up.
+        self.airbyte = airbyte
+        self._airbyte_down: str | None = None
 
     def mode_for(self, dataset: str) -> str:
         """hybrid: Airbyte syncs the small zone lookup; the monthly trip files are streamed straight to S3.
         Airbyte's File source loads a whole month into pandas (about 2.5 GB for 3.5M rows), which does not
         fit next to the Airbyte platform on an 8 GB machine. The direct path keeps memory constant and
-        lands the original, unmodified file."""
+        lands the original, unmodified file. If Airbyte cannot be reached, see _airbyte_ready()."""
         if self.settings.ingest_mode == "hybrid":
-            return "airbyte" if dataset == "zones" else "direct"
-        return self.settings.ingest_mode
+            mode = "airbyte" if dataset == "zones" else "direct"
+        else:
+            mode = self.settings.ingest_mode
+        return "direct" if mode == "airbyte" and self._airbyte_down else mode
+
+    def _airbyte_ready(self) -> bool:
+        """Creates the Airbyte client and checks that the API answers (and accepts the credentials).
+
+        Airbyte (abctl) is a local install that is easy to find stopped, for example after a reboot,
+        because its control-plane container only restarts on failure. The wrapper starts that container
+        when it exists and waits for the API (AIRBYTE_START_TIMEOUT, default 300 s). If Airbyte still does
+        not answer and AIRBYTE_FALLBACK=direct (the default), the file is downloaded from the same TLC URL
+        and uploaded unmodified to the same S3 prefix, and ingestion_log records mode=direct. Set
+        AIRBYTE_FALLBACK=fail to stop the run instead."""
+        if self.airbyte is not None:
+            return True
+        if self._airbyte_down:
+            return False
+        url = os.environ.get("AIRBYTE_API_URL", "").strip()
+        client_id = os.environ.get("AIRBYTE_CLIENT_ID", "").strip()
+        secret = os.environ.get("AIRBYTE_CLIENT_SECRET", "").strip()
+        reason = ""
+        if not (url and client_id and secret):
+            reason = "AIRBYTE_API_URL, AIRBYTE_CLIENT_ID and AIRBYTE_CLIENT_SECRET are not set in .env"
+        else:
+            client = AirbyteClient(url, client_id, secret)
+            reason = client.unavailable_reason()
+            wait = start_local_airbyte(url) if reason else 0.0
+            deadline = time.monotonic() + wait
+            while reason and time.monotonic() < deadline:
+                time.sleep(10)
+                reason = client.unavailable_reason()
+            if not reason:
+                self.airbyte = client
+                return True
+        if os.environ.get("AIRBYTE_FALLBACK", "direct").strip().lower() == "fail":
+            raise IngestionError(f"Airbyte is not available: {reason}")
+        log.warning("Airbyte is not available (%s): downloading straight from the TLC to the same S3 prefix "
+                    "instead (AIRBYTE_FALLBACK=direct)", reason)
+        self._airbyte_down = reason
+        return False
 
     # -- public entry points
     def zones(self) -> None:
@@ -513,7 +586,7 @@ class Ingestor:
         if self._is_current(dataset, mes, prefix):
             return
         try:
-            if self.mode_for(dataset) == "airbyte":
+            if self.mode_for(dataset) == "airbyte" and self._airbyte_ready():
                 self._via_airbyte(dataset, month, mes, url, prefix, mirror_dir)
             else:
                 self._direct(dataset, mes, url, prefix, mirror_dir, file_name)
