@@ -2,6 +2,10 @@
 *.sh text eol=lf
 Makefile text eol=lf
 *.alloy text eol=lf
+# make includes .env (copied from this template): CRLF would leave a "\r" at the end of every value.
+.env.example text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
 
 # Office documents are ZIP archives: never convert line endings or try a text diff.
 *.docx binary

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import urlparse
 
 import duckdb
 
@@ -21,6 +22,14 @@ except ImportError:  # pragma: no cover
     load_dotenv = None
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# The Makefile exports .env as it is. A .env saved with Windows line endings (CRLF, the default of a Git
+# for Windows checkout) would leave a trailing "\r" in every value (an empty passphrase would become
+# "\r"). Values are cleaned once here, so every tool started afterwards (dbt, Dagster) gets clean values.
+for _name, _value in list(os.environ.items()):
+    if _value.endswith("\r"):
+        os.environ[_name] = _value.rstrip("\r")
+
 if load_dotenv is not None and os.environ.get("NYC_TAXI_LOAD_DOTENV", "1") != "0":
     load_dotenv(ROOT / ".env", override=False)
 
@@ -106,6 +115,28 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def loopback(url: str) -> str:
+    """http://localhost:PORT -> http://127.0.0.1:PORT, for the services of docker compose.
+
+    docker compose publishes its ports on 127.0.0.1 only. On Windows, "localhost" tries IPv6 (::1)
+    first, and every refused attempt costs about 2 s before the IPv4 retry: a pipeline run opens
+    hundreds of connections (Dagster events, metrics), so it would spend minutes waiting."""
+    parsed = urlparse(url)
+    if parsed.hostname == "localhost":
+        return parsed._replace(netloc=parsed.netloc.replace("localhost", "127.0.0.1", 1)).geturl()
+    return url
+
+
+def dbt_target() -> str:
+    """dbt target for this run: DBT_TARGET if set, else duckdb (WAREHOUSE=duckdb), the Snowflake key pair
+    (SNOWFLAKE_PRIVATE_KEY_PATH set) or Snowflake browser SSO."""
+    if _env("DBT_TARGET"):
+        return _env("DBT_TARGET")
+    if _env("WAREHOUSE", "snowflake").lower() == "duckdb":
+        return "duckdb"
+    return "snowflake_keypair" if _env("SNOWFLAKE_PRIVATE_KEY_PATH") else "snowflake_browser"
+
+
 @dataclass(frozen=True)
 class Settings:
     """Run settings. Everything comes from environment variables (.env), never from code."""
@@ -139,6 +170,11 @@ class Settings:
             duckdb_memory_limit=_env("DUCKDB_MEMORY_LIMIT", "2GB"),
             duckdb_threads=int(_env("DUCKDB_THREADS", "4")),
         )
+
+    @property
+    def offline(self) -> bool:
+        """INGEST_MODE=direct WAREHOUSE=duckdb: no cloud at all (S3 is not used even if S3_BUCKET is set)."""
+        return self.ingest_mode == "direct" and self.warehouse == "duckdb"
 
     # --- local layout (data/ is gitignored) -------------------------------------------------
     @property
@@ -205,7 +241,7 @@ def get_logger(name: str) -> logging.Logger:
         handler = json_file_handler(resolve_path(_env("DATA_DIR") or "data"), RUN_ID)
         if handler is not None:
             root.addHandler(handler)
-        for noisy in ("httpx", "botocore", "boto3", "urllib3", "snowflake.connector"):
+        for noisy in ("httpx", "botocore", "boto3", "urllib3", "snowflake.connector", "alembic"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
     return logging.getLogger(name)
 
