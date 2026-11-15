@@ -1,46 +1,71 @@
 """Creates or updates the Superset business dashboards (English): assigned month vs the same month last year.
 
-Objects are matched by name and updated, so the script can run again safely (make superset-dashboards).
-It creates:
+`make all` runs it as the last Dagster asset (`superset_dashboards`) whenever the docker compose stack
+is up, so the dashboards follow every run without an extra command. Objects are matched by name and
+updated, so it can run again safely (`make superset-dashboards` runs it alone). It creates:
   database   WAREHOUSE=snowflake -> the Snowflake marts through the service user's key pair
              WAREHOUSE=duckdb    -> an offline copy of the marts (<DATA_DIR>/bi/nyc_taxi_bi.duckdb)
   datasets   virtual SQL datasets on marts.fact_trips / agg_zone_hour / dim_zone / dim_date
   dashboards Executive Overview, Demand Patterns, Pickup Zones, Congestion Relief Zone,
              Payments & Tips, Airports
 
-    python superset/bootstrap_dashboards.py --mes 2025-01
+    python -m src.dashboards --mes 2025-01
 """
+from __future__ import annotations
+
 import argparse
 import json
 import os
+import socket
 import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.config import Month, Settings, get_logger  # noqa: E402
+from src.config import Month, Settings, get_logger, loopback
 
 log = get_logger("superset")
 MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 ASSIGNED_COLOR, COMPARISON_COLOR = "#1A85A0", "#B2B2B2"
+DEFAULT_URL = "http://localhost:8090"
+
+
+def superset_url() -> str:
+    return os.environ.get("SUPERSET_URL", "").strip() or DEFAULT_URL
+
+
+def superset_expected() -> bool:
+    """True when the docker compose stack publishes Superset (its port accepts connections).
+
+    Docker publishes the port as soon as the container starts, even while Superset still runs its
+    first-start migrations, so this answers at once. SupersetAPI then waits for /health."""
+    parsed = urlparse(loopback(superset_url()))
+    host, port = parsed.hostname or "127.0.0.1", parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        socket.create_connection((host, port), timeout=3).close()
+        return True
+    except OSError:
+        return False
 
 
 # --- Superset REST API -------------------------------------------------------------------------------------
 class SupersetAPI:
     def __init__(self, url: str, user: str, password: str):
-        self.http = httpx.Client(base_url=url.rstrip("/"), timeout=180)
-        for _ in range(60):  # first start runs migrations
+        self.http = httpx.Client(base_url=loopback(url).rstrip("/"), timeout=180)
+        # The first `docker compose up -d` builds the image and runs the metadata migrations: wait for it.
+        deadline = time.monotonic() + float(os.environ.get("SUPERSET_WAIT_SECONDS", "900"))
+        while True:
             try:
                 if self.http.get("/health").status_code == 200:
                     break
             except httpx.TransportError:
                 pass
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"Superset is not reachable at {url}: start the stack with `docker compose up -d`")
             time.sleep(5)
-        else:
-            raise RuntimeError(f"Superset is not reachable at {url}: run `make up` first")
         token = self._ok(self.http.post("/api/v1/security/login", json={
             "username": user, "password": password, "provider": "db", "refresh": True}))["access_token"]
         self.http.headers["Authorization"] = f"Bearer {token}"
@@ -107,8 +132,16 @@ def match_columns(params: dict[str, Any], columns: dict[str, str]) -> dict[str, 
 
 
 # --- connection -------------------------------------------------------------------------------------------------
+# Lineage/audit text columns that no dashboard reads: left out of the BI copy to keep it small.
+BI_EXCLUDED_COLUMNS = {"fact_trips": ("trip_key", "source_file", "quality_flags")}
+
+
 def export_bi_copy(settings: Settings) -> Path:
-    """Offline mode: marts copied to a DuckDB file in v1.3 storage format (Superset 5 ships DuckDB 1.3)."""
+    """Offline mode: marts copied to a DuckDB file in v1.3 storage format (Superset 5 ships DuckDB 1.3).
+
+    DuckDB 2.0 compresses text with DICT_FSST even in v1.3 files, and DuckDB 1.3 reads those columns
+    back as NULL (zone names vanish and the airport filter matches nothing). The export disables that
+    method, so text is stored in a format DuckDB 1.3 reads."""
     import duckdb
 
     target = settings.data_dir / "bi" / "nyc_taxi_bi.duckdb"
@@ -116,13 +149,19 @@ def export_bi_copy(settings: Settings) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp.unlink(missing_ok=True)
     con = duckdb.connect()
+    con.execute("SET disabled_compression_methods = 'dict_fsst'")
     con.execute(f"ATTACH '{settings.warehouse_db.as_posix()}' AS wh (READ_ONLY)")
     con.execute(f"ATTACH '{tmp.as_posix()}' AS bi (STORAGE_VERSION 'v1.3.0')")
     con.execute("CREATE SCHEMA bi.marts")
     tables = con.execute(
         "SELECT table_name FROM duckdb_tables() WHERE database_name = 'wh' AND schema_name = 'marts'").fetchall()
     for (name,) in tables:
-        con.execute(f"CREATE TABLE bi.marts.{name} AS SELECT * FROM wh.marts.{name}")
+        existing = {c for (c,) in con.execute(
+            "SELECT column_name FROM duckdb_columns() WHERE database_name = 'wh' AND schema_name = 'marts' "
+            "AND table_name = ?", [name]).fetchall()}
+        excluded = [c for c in BI_EXCLUDED_COLUMNS.get(name, ()) if c in existing]
+        select = f"* EXCLUDE ({', '.join(excluded)})" if excluded else "*"
+        con.execute(f"CREATE TABLE bi.marts.{name} AS SELECT {select} FROM wh.marts.{name}")
     con.execute("DETACH bi")
     con.close()
     os.replace(tmp, target)
@@ -456,13 +495,13 @@ def position(layout: list[list[tuple]], chart_ids: dict[str, int], title: str) -
     return pos
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--mes", required=True)
-    args = parser.parse_args(argv)
-    settings, month = Settings.from_env(), Month.parse(args.mes)
-    api = SupersetAPI(os.environ.get("SUPERSET_URL", "http://localhost:8090"),
-                      os.environ.get("SUPERSET_ADMIN_USER", "admin"), os.environ["SUPERSET_ADMIN_PASSWORD"])
+def build(settings: Settings, month: Month) -> dict[str, Any]:
+    """Creates or updates the connection, datasets and dashboards. Returns a summary for Dagster."""
+    password = os.environ.get("SUPERSET_ADMIN_PASSWORD", "").strip()
+    if not password:
+        raise RuntimeError("SUPERSET_ADMIN_PASSWORD is empty: set it in .env (the same value docker compose uses)")
+    url = superset_url()
+    api = SupersetAPI(url, os.environ.get("SUPERSET_ADMIN_USER", "admin").strip() or "admin", password)
 
     db_payload, schema = database_payload(settings)
     db_id = api.upsert("database", "database_name", db_payload)
@@ -480,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
 
     a = f"{MONTH_ABBR[month.month - 1]} {month.year}"
     b = f"{MONTH_ABBR[month.month - 1]} {month.comparison.year}"
+    built: list[dict[str, Any]] = []
     for spec in dashboards(month):
         dash_id = api.upsert("dashboard", "dashboard_title",
                              {"dashboard_title": spec["title"], "slug": spec["slug"], "published": True},
@@ -492,7 +532,10 @@ def main(argv: list[str] | None = None) -> int:
                 params = match_columns(rest[0], dataset_columns[dataset]) | {"datasource": f"{dataset_ids[dataset]}__table"}
                 payload = {"slice_name": name, "viz_type": params["viz_type"], "datasource_id": dataset_ids[dataset],
                            "datasource_type": "table", "params": json.dumps(params), "dashboards": [dash_id]}
-                chart_ids[name] = api.upsert("chart", "slice_name", payload)
+                # Superset saves a chart's query (query_context) the first time it is opened in Explore,
+                # with the column names of that moment. After a warehouse switch (period vs PERIOD) that
+                # saved query would fail, so it is cleared and Superset rebuilds it from params.
+                chart_ids[name] = api.upsert("chart", "slice_name", payload, update=payload | {"query_context": None})
         metadata = {"color_scheme": "supersetColors", "label_colors": {a: ASSIGNED_COLOR, b: COMPARISON_COLOR},
                     "refresh_frequency": 0, "timed_refresh_immune_slices": [], "expanded_slices": {},
                     "native_filter_configuration": [], "cross_filters_enabled": False}
@@ -500,6 +543,16 @@ def main(argv: list[str] | None = None) -> int:
             "position_json": json.dumps(position(spec["layout"], chart_ids, spec["title"])),
             "json_metadata": json.dumps(metadata), "published": True}))
         log.info("dashboard %s -> /superset/dashboard/%s/ (%d charts)", spec["title"], spec["slug"], len(chart_ids))
+        built.append({"title": spec["title"], "url": f"{url.rstrip('/')}/superset/dashboard/{spec['slug']}/",
+                      "charts": len(chart_ids)})
+    return {"database": db_payload["database_name"], "datasets": len(dataset_ids), "dashboards": built}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--mes", required=True)
+    args = parser.parse_args(argv)
+    build(Settings.from_env(), Month.parse(args.mes))
     return 0
 
 
