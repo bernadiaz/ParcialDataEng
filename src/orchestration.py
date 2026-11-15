@@ -178,9 +178,30 @@ def curated_yellow_trips(context: AssetExecutionContext) -> MaterializeResult:
 def warehouse_raw_yellow_trips(context: AssetExecutionContext) -> MaterializeResult:
     settings, month = _settings(), Month.parse(context.partition_key)
     with track_step(settings, f"load-{settings.warehouse}", month.label):
-        result = load_snowflake.load_months(settings, [month], include_zones=False)[0]
+        result = load_snowflake.load_months(settings, [month], include_zones=False, include_quarantine=False)[0]
     return MaterializeResult(metadata={"rows_loaded": result.rows_loaded, "rows_replaced": result.rows_deleted,
                                        "warehouse": settings.warehouse})
+
+
+@asset(key=AssetKey(["raw", "yellow_quarantine"]), partitions_def=MONTHLY, group_name="warehouse",
+       kinds={"snowflake", "s3", "parquet"}, deps=[curated_yellow_trips],
+       description="Quarantine of the month: every rejected row as read (contract columns), its source file and row "
+                   "number and the reject rules it violated. Loaded into RAW.YELLOW_QUARANTINE (the month is replaced) "
+                   "and, in cloud mode, copied to s3://<bucket>/quarantine/yellow/year=/month=/.")
+def warehouse_raw_yellow_quarantine(context: AssetExecutionContext) -> MaterializeResult:
+    settings, month = _settings(), Month.parse(context.partition_key)
+    with track_step(settings, f"quarantine-{settings.warehouse}", month.label):
+        s3_uri = calidad.publish_quarantine(settings, month)
+        result = load_snowflake.load_months(settings, [month], include_zones=False, include_trips=False)[0]
+        by_rule = calidad.quarantine_by_rule(settings, month)
+    return MaterializeResult(metadata={
+        "rows_loaded": result.rows_loaded,
+        "rows_replaced": result.rows_deleted,
+        "rows_by_rule": MetadataValue.json(by_rule),
+        "warehouse_table": f"{'raw' if settings.warehouse == 'duckdb' else 'RAW'}.yellow_quarantine",
+        "local_file": MetadataValue.path(str(calidad.quarantine_file(settings, month))),
+        "s3": s3_uri or "offline mode: local file only",
+    })
 
 
 @asset(key=AssetKey(["raw", "taxi_zones"]), group_name="warehouse", kinds={"snowflake"}, deps=[taxi_zone_lookup],
@@ -217,7 +238,8 @@ def resultados_md(context: AssetExecutionContext, config: QuestionsConfig) -> Ma
 
 
 @asset(group_name="analytics", kinds={"superset"},
-       deps=[get_asset_key_for_model([dbt_models], name) for name in ("fact_trips", "agg_zone_hour", "dim_zone", "dim_date")],
+       deps=[get_asset_key_for_model([dbt_models], name)
+             for name in ("fact_trips", "agg_zone_hour", "dim_zone", "dim_date", "agg_quarantine_rule")],
        description="The 6 Superset dashboards (English) on the marts, created or updated through the Superset API "
                    "(Snowflake, or the offline DuckDB copy when WAREHOUSE=duckdb).")
 def superset_dashboards(context: AssetExecutionContext, config: QuestionsConfig) -> MaterializeResult:
@@ -232,7 +254,8 @@ def superset_dashboards(context: AssetExecutionContext, config: QuestionsConfig)
     })
 
 
-MONTHLY_ASSETS = [raw_yellow_trips, yellow_schema_report, curated_yellow_trips, warehouse_raw_yellow_trips]
+MONTHLY_ASSETS = [raw_yellow_trips, yellow_schema_report, curated_yellow_trips, warehouse_raw_yellow_trips,
+                  warehouse_raw_yellow_quarantine]
 ALL_ASSETS = [taxi_zone_lookup, *MONTHLY_ASSETS, warehouse_raw_taxi_zones, dbt_models, resultados_md, superset_dashboards]
 RESOURCES = {"dbt": DbtCliResource(project_dir=DBT_PROJECT, profiles_dir=str(DBT_DIR), target=_target(),
                                    dbt_executable=DBT_EXE)}

@@ -25,7 +25,17 @@ import duckdb
 import yaml
 
 from src import esquema
-from src.config import CONTRACTS_DIR, RUN_ID, Month, Settings, configure_duckdb, control_db, get_logger, track_step
+from src.config import (
+    CONTRACTS_DIR,
+    RUN_ID,
+    Month,
+    Settings,
+    configure_duckdb,
+    control_db,
+    duckdb_config,
+    get_logger,
+    track_step,
+)
 from src.observability import push
 
 log = get_logger("calidad")
@@ -293,6 +303,47 @@ def write_reports(settings: Settings, result: QualityResult, rules: list[Rule], 
             [[RUN_ID, r["mes"], r["rule_id"], r["name"], r["severity"], r["threshold"], r["violations"], r["pct_of_read"]] for r in rows],
         )
     return md_path, csv_path
+
+
+# --- quarantine files -------------------------------------------------------------------------------------
+def quarantine_file(settings: Settings, month: Month) -> Path:
+    return settings.quarantine_month_dir(month) / PART_FILE
+
+
+def quarantine_by_rule(settings: Settings, month: Month) -> dict[str, int]:
+    """Quarantined rows per violated reject rule (a row can violate several, so they overlap)."""
+    path = quarantine_file(settings, month)
+    if not path.exists():
+        return {}
+    with duckdb.connect(config=duckdb_config()) as con:
+        rows = con.execute(
+            "SELECT rule_id, count(*) FROM (SELECT unnest(string_split(violated_rules, ';')) AS rule_id "
+            f"FROM read_parquet('{path.as_posix()}', hive_partitioning = false)) GROUP BY 1 ORDER BY 1"
+        ).fetchall()
+    return {rule: int(n) for rule, n in rows}
+
+
+def publish_quarantine(settings: Settings, month: Month, s3: Any | None = None) -> str | None:
+    """Cloud mode: copies the month's quarantine file to the lake, next to the raw zone:
+    s3://<bucket>/<S3_QUARANTINE_PREFIX>/yellow/year=YYYY/month=MM/part-0.parquet. Any other object of
+    that month's prefix is removed, so a rerun replaces the month. Offline mode (or no bucket): None."""
+    if not settings.s3_bucket or settings.offline:
+        return None
+    path = quarantine_file(settings, month)
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found: run `make quality MES={month}` first")
+    if s3 is None:
+        from src.ingesta_airbyte import S3Store
+
+        s3 = S3Store(settings)
+    prefix = f"{settings.s3_quarantine_prefix}/yellow/{month.partition}/"
+    key = prefix + PART_FILE
+    s3.upload(path, key)
+    stale = [o["key"] for o in s3.list(prefix) if o["key"] != key]
+    if stale:
+        s3.delete(stale)
+    log.info("quarantine %s: %s", month, s3.uri(key))
+    return s3.uri(key)
 
 
 def main(argv: list[str] | None = None) -> int:

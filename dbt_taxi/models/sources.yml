@@ -22,5 +22,17 @@ sources:
         columns:
           - name: location_id
             data_tests: [unique, not_null]
+      - name: yellow_quarantine
+        description: >
+          Quarantine (exam Part 3): one row per rejected trip, with the original values (contract
+          columns), source_file + source_row_number (the untouched raw row) and violated_rules (the
+          reject rule ids, ';'-separated). Each (year, month) is replaced as a whole by the loader.
+        columns:
+          - name: violated_rules
+            data_tests: [not_null]
+          - name: source_file
+            data_tests: [not_null]
+          - name: source_row_number
+            data_tests: [not_null]
       - name: load_log
         description: One row per load (rows deleted, rows loaded, file SHA-256). Used in the oral defense.

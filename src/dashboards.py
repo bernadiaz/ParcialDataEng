@@ -134,7 +134,8 @@ def match_columns(params: dict[str, Any], columns: dict[str, str]) -> dict[str, 
 
 # --- connection -------------------------------------------------------------------------------------------------
 # Lineage/audit text columns that no dashboard reads: left out of the BI copy to keep it small.
-BI_EXCLUDED_COLUMNS = {"fact_trips": ("trip_key", "source_file", "quality_flags")}
+BI_EXCLUDED_COLUMNS = {"fact_trips": ("trip_key", "source_file", "quality_flags"), "yellow_quarantine": ("run_id",)}
+BI_RAW_TABLES = ("yellow_quarantine",)
 
 
 def export_bi_copy(settings: Settings) -> Path:
@@ -153,16 +154,19 @@ def export_bi_copy(settings: Settings) -> Path:
     con.execute("SET disabled_compression_methods = 'dict_fsst'")
     con.execute(f"ATTACH '{settings.warehouse_db.as_posix()}' AS wh (READ_ONLY)")
     con.execute(f"ATTACH '{tmp.as_posix()}' AS bi (STORAGE_VERSION 'v1.3.0')")
-    con.execute("CREATE SCHEMA bi.marts")
+    # Every mart, plus the quarantine table (the Data Quality & Quarantine dashboard shows its rows).
     tables = con.execute(
-        "SELECT table_name FROM duckdb_tables() WHERE database_name = 'wh' AND schema_name = 'marts'").fetchall()
-    for (name,) in tables:
+        "SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'wh' "
+        "AND (schema_name = 'marts' OR (schema_name = 'raw' AND list_contains(?, table_name)))", [list(BI_RAW_TABLES)]).fetchall()
+    for schema in sorted({s for s, _ in tables}):
+        con.execute(f"CREATE SCHEMA bi.{schema}")
+    for schema, name in tables:
         existing = {c for (c,) in con.execute(
-            "SELECT column_name FROM duckdb_columns() WHERE database_name = 'wh' AND schema_name = 'marts' "
-            "AND table_name = ?", [name]).fetchall()}
+            "SELECT column_name FROM duckdb_columns() WHERE database_name = 'wh' AND schema_name = ? "
+            "AND table_name = ?", [schema, name]).fetchall()}
         excluded = [c for c in BI_EXCLUDED_COLUMNS.get(name, ()) if c in existing]
         select = f"* EXCLUDE ({', '.join(excluded)})" if excluded else "*"
-        con.execute(f"CREATE TABLE bi.marts.{name} AS SELECT {select} FROM wh.marts.{name}")
+        con.execute(f"CREATE TABLE bi.{schema}.{name} AS SELECT {select} FROM wh.{schema}.{name}")
     con.execute("DETACH bi")
     con.close()
     os.replace(tmp, target)
@@ -322,6 +326,30 @@ join marts.dim_zone as z on z.location_id = f.pu_location_id
 where f.year = {y} and f.month = {m}
 group by 1, 2
 having count(*) >= 1000""",
+        # Quality gate: every row read is accepted (fact_trips) or quarantined (raw.yellow_quarantine).
+        "nyc_quality_totals": f"""
+with accepted as (
+    select year, month, count(*) as accepted_rows from marts.fact_trips where {s()} group by 1, 2
+), quarantined as (
+    select year, month, count(*) as quarantined_rows from raw.yellow_quarantine where {s()} group by 1, 2
+)
+select {p('a.')} as period,
+       a.accepted_rows + coalesce(q.quarantined_rows, 0) as rows_read,
+       a.accepted_rows,
+       coalesce(q.quarantined_rows, 0) as quarantined_rows,
+       100.0 * coalesce(q.quarantined_rows, 0) / (a.accepted_rows + coalesce(q.quarantined_rows, 0)) as pct_quarantined
+from accepted as a
+left join quarantined as q on q.year = a.year and q.month = a.month""",
+        "nyc_quarantine_rules": f"""
+select {p()} as period, rule_id, quarantined_rows
+from marts.agg_quarantine_rule
+where {s()}""",
+        "nyc_quarantine_rows": f"""
+select {p()} as period, violated_rules, source_file, source_row_number,
+       tpep_pickup_datetime as pickup_at, tpep_dropoff_datetime as dropoff_at, trip_distance,
+       fare_amount, total_amount, passenger_count, pu_location_id, do_location_id
+from raw.yellow_quarantine
+where {s()}""",
     }
 
 
@@ -469,8 +497,48 @@ def dashboards(month: Month) -> list[dict[str, Any]]:
                   series("bar", "airport", [metric("SUM(duration_sum) / SUM(trips)", "Minutes")], "Airport", "Minutes", ",.1f"), 6, 50)],
             ],
         },
+        {
+            "title": f"NYC Taxi | Data Quality & Quarantine: {a} vs {b}", "slug": "nyc-taxi-quality",
+            "layout": [
+                [("md", "### Quality gate and quarantine\nEvery row read ends in the curated layer (accepted) or in "
+                        "quarantine (rejected), and the pipeline fails if `rows read = accepted + quarantined` does not "
+                        "hold. Quarantined rows keep their original values, the source file and row number, and the reject "
+                        "rules they violated (`RAW.YELLOW_QUARANTINE`). Warnings never drop a row.\n\n"
+                        + rules_markdown(), 12, 46)],
+                [("Quarantined rows " + a, "nyc_quality_totals",
+                  big_number(metric("SUM(quarantined_rows)", "Quarantined"), a, "rows rejected by the quality gate"), 3, 30),
+                 ("Quarantined rows " + b, "nyc_quality_totals",
+                  big_number(metric("SUM(quarantined_rows)", "Quarantined"), b, "rows rejected by the quality gate"), 3, 30),
+                 ("Quarantine share " + a, "nyc_quality_totals",
+                  big_number(metric("MAX(pct_quarantined)", "% quarantined"), a, "% of rows read", ",.2f"), 3, 30),
+                 ("Quarantine share " + b, "nyc_quality_totals",
+                  big_number(metric("MAX(pct_quarantined)", "% quarantined"), b, "% of rows read", ",.2f"), 3, 30)],
+                [("Reconciliation: rows read = accepted + quarantined", "nyc_quality_totals",
+                  table(["period", "rows_read", "accepted_rows", "quarantined_rows", "pct_quarantined"],
+                        {"rows_read": ",d", "accepted_rows": ",d", "quarantined_rows": ",d", "pct_quarantined": ",.2f"}), 5, 40),
+                 ("Quarantined rows by violated rule", "nyc_quarantine_rules",
+                  series("bar", "rule_id", [metric("SUM(quarantined_rows)", "Quarantined rows")], "Reject rule",
+                         "Rows (a row can violate several rules)"), 7, 40)],
+                [("Quarantined rows: original values and violated rules", "nyc_quarantine_rows",
+                  table(["period", "violated_rules", "source_file", "source_row_number", "pickup_at", "dropoff_at",
+                         "trip_distance", "fare_amount", "total_amount", "passenger_count", "pu_location_id",
+                         "do_location_id"],
+                        {"trip_distance": ",.2f", "fare_amount": "$,.2f", "total_amount": "$,.2f"}), 12, 70)],
+            ],
+        },
     ]
     return rows
+
+
+def rules_markdown() -> str:
+    """Rule table for the dashboard, read from contracts/quality_rules.yaml (the single source)."""
+    from src.calidad import load_rules
+
+    _, rules = load_rules()
+    lines = ["| Rule | Severity | Description | Threshold |", "|---|---|---|---|"]
+    for rule in rules:
+        lines.append(f"| {rule.id} | {rule.severity} | {rule.description} | {rule.threshold.replace('|', '/')} |")
+    return "\n".join(lines)
 
 
 def position(layout: list[list[tuple]], chart_ids: dict[str, int], title: str) -> dict[str, Any]:
