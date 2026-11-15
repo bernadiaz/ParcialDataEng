@@ -1,30 +1,35 @@
 # =============================================================================================
 # NYC Taxi pipeline - single entry point. `make all` runs the pipeline through Dagster.
 #
-#   make install                  create .venv and install the project (Python 3.12+)
-#   make up                       observability + BI stack (Grafana, Prometheus, Loki, Dozzle, Superset)
-#   make all MES=2025-01          ingest -> schema -> quality -> load -> dbt -> questions
-#                                 for MES and the same month of the previous year (Dagster)
-#   make superset-dashboards      business dashboards in Superset
+#   docker compose up -d          Dagster UI, Grafana, Prometheus, Loki, Dozzle, Superset (or: make up)
+#   make all MES=2025-01          cloud: ingest -> schema -> quality -> load -> dbt -> questions ->
+#                                 Superset dashboards, for MES and the same month of the previous year
+#   make all MES=2025-01 INGEST_MODE=direct WAREHOUSE=duckdb      the same, offline (no cloud account)
 #   make help                     list every target
 #
-# Settings and credentials come from .env (see .env.example). Paths in .env are portable (~ = home,
-# relative = repo) and are resolved by src/config.py, so this Makefile has no machine-specific path.
-# Works on Linux, macOS and Windows (run make from Git Bash).
+# `make all` creates .venv and installs the project the first time (and again when pyproject.toml
+# changes), so `make install` is optional. Settings and credentials come from .env (see .env.example).
+# Paths in .env are portable (~ = home, relative = repo) and are resolved by src/config.py, so this
+# Makefile has no machine-specific path. Works on Linux, macOS and Windows (run make from Git Bash).
 # =============================================================================================
 -include .env
 export
 
 MES ?= 2025-01
 
+# Python 3.12 or newer: the first interpreter of the list that qualifies (override with PYTHON=...).
 ifeq ($(OS),Windows_NT)
   VENV_BIN := .venv/Scripts
-  PYTHON ?= py -3.12
+  PY_CANDIDATES := "py -3.12" "py -3.13" "py -3.14" "py -3" python3 python
 else
   VENV_BIN := .venv/bin
-  PYTHON ?= python3.12
+  PY_CANDIDATES := python3.12 python3.13 python3.14 python3
 endif
+PYTHON ?= $(shell for c in $(PY_CANDIDATES); do $$c -c 'import sys; sys.exit(sys.version_info < (3, 12))' >/dev/null 2>&1 && { echo "$$c"; break; }; done)
+unexport PYTHON PY_CANDIDATES
 PY  := $(VENV_BIN)/python
+# Written by `make install`; older than pyproject.toml (or missing) = the .venv must be (re)installed.
+VENV := .venv/.installed
 # dbt and the Dagster UI run through src/run_tool.py, which resolves the paths of .env first.
 DBT := $(PY) -m src.run_tool dbt
 
@@ -42,16 +47,9 @@ empty :=
 space := $(empty) $(empty)
 export DBT_MONTHS = $(subst $(space),$(comma),$(strip $(MONTHS)))
 
-# dbt target: offline DuckDB, Snowflake key pair (service user) or Snowflake browser SSO.
-ifeq ($(WAREHOUSE),duckdb)
-  DBT_TARGET ?= duckdb
-else ifneq ($(strip $(SNOWFLAKE_PRIVATE_KEY_PATH)),)
-  DBT_TARGET ?= snowflake_keypair
-else
-  DBT_TARGET ?= snowflake_browser
-endif
-export DBT_TARGET
-DBT_ARGS = --project-dir dbt_taxi --profiles-dir dbt_taxi --target $(DBT_TARGET)
+# dbt target (offline DuckDB, Snowflake key pair or browser SSO): chosen by src/config.py, the same rule
+# that `make all` uses, and added by src/run_tool.py.
+DBT_ARGS = --project-dir dbt_taxi --profiles-dir dbt_taxi
 
 .DEFAULT_GOAL := help
 .PHONY: help install all all-steps dagster-ui up down superset-dashboards airbyte-setup airbyte-sync schema \
@@ -61,28 +59,34 @@ DBT_ARGS = --project-dir dbt_taxi --profiles-dir dbt_taxi --target $(DBT_TARGET)
 help: ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*## ' Makefile | sed -E 's/:.*## /\t/' | expand -t 22
 
-install: ## create .venv and install dependencies (override the interpreter with PYTHON=...)
-	$(PYTHON) -m venv .venv
+install: ## create .venv and install dependencies (Python 3.12+ found automatically, or PYTHON=...)
+	@test -n "$(PYTHON)" || { echo "Python 3.12 or newer was not found. Install it (see the run guide) or pass PYTHON=..."; exit 1; }
+	$(PYTHON) -m venv --clear .venv
 	$(PY) -m pip install --upgrade pip
 	$(PY) -m pip install -e ".[dev]"
+	@$(PY) -c "open('$(VENV)', 'w').close()"
 
-all: ## full pipeline for MES and its comparison month, orchestrated by Dagster (runs visible in make dagster-ui)
+$(VENV): pyproject.toml
+	@echo "Preparing .venv (first run, or pyproject.toml changed)..."
+	@$(MAKE) --no-print-directory install
+
+all: $(VENV) ## full pipeline for MES and its comparison month, orchestrated by Dagster (lineage at http://localhost:3003)
 	$(PY) -m src.orchestration --mes $(MES)
 
-all-steps: airbyte-sync schema quality load-sf dbt-run questions ## same pipeline, step by step without Dagster (debugging)
+all-steps: $(VENV) airbyte-sync schema quality load-sf dbt-run questions ## same pipeline, step by step without Dagster (debugging)
 	@echo "Pipeline finished for $(MONTHS) (run $(RUN_ID))"
 
-dagster-ui: ## Dagster UI on http://localhost:3003 (asset lineage, partitions, runs, reconciliation checks)
+dagster-ui: $(VENV) ## Dagster UI on http://localhost:3003 (already served by docker compose when the stack is up)
 	$(PY) -m src.run_tool dagster-ui 3003
 
-up: ## start Prometheus, Pushgateway, Grafana, Loki, Alloy, Dozzle and Superset (docker compose)
+up: ## start the Dagster UI, Grafana, Prometheus, Pushgateway, Loki, Alloy, Dozzle and Superset (docker compose)
 	docker compose up -d --build
 
 down: ## stop the docker compose stack (volumes are kept)
 	docker compose down
 
-superset-dashboards: ## create/update the Superset dashboards (English) for MES vs the same month last year
-	$(PY) superset/bootstrap_dashboards.py --mes $(MES)
+superset-dashboards: $(VENV) ## create/update the Superset dashboards alone (make all already does it)
+	$(PY) -m src.dashboards --mes $(MES)
 
 airbyte-setup: ## optional: create the Airbyte objects ahead of time (ingestion creates them automatically)
 	$(PY) -m src.ingesta_airbyte --setup --mes $(MES)
@@ -108,7 +112,7 @@ dbt-docs: ## generate dbt docs (lineage and model descriptions)
 questions: ## run sql/q1..q6 against the marts and write RESULTADOS.md
 	$(PY) -m src.resultados --mes $(MES)
 
-test: ## pytest on synthetic data (no cloud account needed)
+test: $(VENV) ## pytest on synthetic data (no cloud account needed)
 	$(PY) -m pytest
 
 explore: ## distance / speed exploration behind the R03 and R09 thresholds
@@ -128,5 +132,5 @@ quality-report: ## print the quality report (MES)
 finops: ## Snowflake credits and query time of this project (by query tag)
 	$(PY) -m src.demos finops
 
-clean: ## remove local data (DATA_DIR) and dbt artifacts (keeps .env, .venv and the Superset metadata in DATA_DIR/superset_home)
-	$(PY) -c "import shutil; from src.config import Settings; d = Settings.from_env().data_dir; [shutil.rmtree(p, ignore_errors=True) if p.is_dir() else p.unlink() for p in (sorted(d.iterdir()) if d.is_dir() else []) if p.name != 'superset_home']; [shutil.rmtree(p, ignore_errors=True) for p in ('dbt_taxi/target', 'dbt_taxi/logs')]"
+clean: $(VENV) ## empty DATA_DIR, the Dagster history and the dbt artifacts (keeps .env, .venv and the Superset dashboards)
+	$(PY) -m src.clean
