@@ -35,7 +35,9 @@ SUPERSET_DUCKDB_MEMORY = "512MB"  # per query budget of the offline copy inside 
 
 
 def superset_url() -> str:
-    return os.environ.get("SUPERSET_URL", "").strip() or DEFAULT_URL
+    """SUPERSET_URL, or http://localhost:<SUPERSET_PORT> (the port docker compose publishes, 8090 by default)."""
+    port = os.environ.get("SUPERSET_PORT", "").strip()
+    return os.environ.get("SUPERSET_URL", "").strip() or (f"http://localhost:{port}" if port else DEFAULT_URL)
 
 
 def superset_expected() -> bool:
