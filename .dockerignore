@@ -1,0 +1,4 @@
+# Build context of the Dagster UI image (docker-compose.yml, service dagster): it only needs
+# pyproject.toml. The code is mounted at run time, and .venv, data and .env must never reach the image.
+*
+!pyproject.toml

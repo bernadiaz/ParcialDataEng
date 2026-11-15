@@ -8,28 +8,32 @@ version = "0.1.0"
 description = "Batch ELT for NYC TLC yellow taxi trips: Airbyte -> S3 -> DuckDB quality gate -> Snowflake + dbt."
 readme = "README.md"
 requires-python = ">=3.12"
+# Versions are pinned to the ones the pipeline was tested with, so every computer (and the Dagster UI
+# image of docker compose, built from this same list) resolves the same set. The Dagster packages must
+# match exactly: the host and the UI container share one run-history database.
 dependencies = [
-    "duckdb>=1.1",
+    "duckdb>=2.0,<3",
     "pyyaml>=6.0",
     "boto3>=1.34",
-    "httpx>=0.27",
+    "httpx>=0.27,<1",
     "python-dotenv>=1.0",
     "psutil>=5.9",
     "prometheus-client>=0.20",
-    "snowflake-connector-python>=3.12",
-    "dbt-core>=1.9",
-    "dbt-snowflake>=1.9",
-    "dagster>=1.10",
-    "dagster-webserver>=1.10",
-    "dagster-dbt>=0.26",
+    "snowflake-connector-python>=5.2,<6",
+    "dbt-core>=1.12,<1.13",
+    "dbt-snowflake>=1.12,<1.13",
+    "dagster==1.13.30",
+    "dagster-webserver==1.13.30",
+    "dagster-dbt==0.29.30",
+    "dagster-postgres==0.29.30",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
     "moto[s3]>=5",
-    # Offline target used to validate the dbt models without a Snowflake account
-    "dbt-duckdb>=1.9",
+    # Offline target (WAREHOUSE=duckdb): runs the dbt models without a Snowflake account
+    "dbt-duckdb>=1.11,<1.12",
 ]
 
 [tool.setuptools]

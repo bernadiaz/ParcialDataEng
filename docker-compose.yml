@@ -1,16 +1,89 @@
-# Observability + BI stack for the NYC Taxi pipeline (make up / make down).
+# Orchestration UI + observability + BI stack for the NYC Taxi pipeline (`docker compose up -d` or
+# `make up`), then `make all MES=2025-01`:
+#   Dagster     http://localhost:3003   lineage, partitions and runs of `make all` (read only)
 #   Grafana     http://localhost:3002   pipeline health, data quality, logs (Prometheus + Loki)
+#   Superset    http://localhost:8090   business dashboards on the marts (English), built by `make all`
+#   Dozzle      http://localhost:8081   live container logs
 #   Prometheus  http://localhost:9090   scrapes the Pushgateway
 #   Pushgateway http://localhost:9091   receives the metrics of every pipeline step
 #   Loki        http://localhost:3100   log store (Grafana Alloy ships pipeline + container logs)
-#   Dozzle      http://localhost:8081   live container logs
-#   Superset    http://localhost:8090   business dashboards on the Snowflake marts (English)
-#   Dagster     http://localhost:3003   orchestration UI (make dagster-ui runs it on the host)
+#   Postgres    127.0.0.1:5434          Dagster run history, shared by `make all` and the Dagster UI
 # Secrets come from .env. Images are pinned to exact versions. Ports bind to 127.0.0.1 only and avoid
-# the ports of other local stacks (3000/3001/8088/8089 are often taken).
+# the ports of other local stacks (3000/3001/8088/8089, and 5432/5433 of a local PostgreSQL).
 name: nyc-taxi
 
 services:
+  # One-shot: creates the DATA_DIR folders that the containers mount, owned by whoever cloned the
+  # repository. On Linux, Docker would otherwise create missing bind-mount folders as root, and
+  # `make all` (run as your user) could no longer write to DATA_DIR. On Docker Desktop (Windows,
+  # macOS) it changes nothing.
+  data-dirs:
+    image: busybox:1.37.0
+    volumes:
+      - ${DATA_DIR:-./data}:/data
+      - ${SNOWFLAKE_KEYS_DIR:-./data/keys}:/keys
+      - .:/repo:ro
+    command:
+      - sh
+      - -c
+      - |
+        owner=$$(stat -c %u:%g /repo)
+        mkdir -p /data/logs /data/bi /data/superset_home /data/dagster_home/storage
+        chown "$$owner" /data /data/logs /data/bi /data/dagster_home /data/dagster_home/storage /keys 2>/dev/null || true
+        chown 1000:1000 /data/superset_home 2>/dev/null || true
+    restart: "no"
+
+  dagster-postgres:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_USER: ${DAGSTER_PG_USER:-dagster}
+      POSTGRES_PASSWORD: ${DAGSTER_PG_PASSWORD:-dagster}
+      POSTGRES_DB: ${DAGSTER_PG_DB:-dagster}
+    volumes: [dagster-postgres-data:/var/lib/postgresql/data]
+    ports: ["127.0.0.1:${DAGSTER_PG_PORT:-5434}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  # Dagster UI. `make all` runs on the host and writes each run to dagster-postgres; this UI reads the
+  # same history, so the lineage turns green as the runs finish. Read only: runs start from `make all`.
+  dagster:
+    build:
+      context: .
+      dockerfile: dagster/Dockerfile
+    image: nyc-taxi-dagster
+    pull_policy: build
+    environment:
+      DAGSTER_HOME: /opt/dagster/home
+      DAGSTER_STORAGE: postgres
+      DAGSTER_PG_HOST: dagster-postgres
+      DAGSTER_PG_PORT: "5432"
+      DAGSTER_PG_USER: ${DAGSTER_PG_USER:-dagster}
+      DAGSTER_PG_PASSWORD: ${DAGSTER_PG_PASSWORD:-dagster}
+      DAGSTER_PG_DB: ${DAGSTER_PG_DB:-dagster}
+      DAGSTER_COMPUTE_LOGS_DIR: /opt/dagster/compute_logs
+      DATA_DIR: /opt/dagster/data
+      # The UI only needs the dbt manifest: it parses the project offline into its own folder.
+      DBT_TARGET: duckdb
+      DBT_TARGET_PATH: /opt/dagster/dbt_target
+      DBT_LOG_PATH: /opt/dagster/dbt_logs
+      DBT_SEND_ANONYMOUS_USAGE_STATS: "false"
+      LOG_TO_FILE: "0"
+      PUSHGATEWAY_URL: ""
+      PYTHONPATH: /opt/nyc_taxi
+    volumes:
+      - .:/opt/nyc_taxi:ro
+      # Step logs (stdout/stderr) that `make all` writes on Linux and macOS hosts
+      - ${DATA_DIR:-./data}/dagster_home/storage:/opt/dagster/compute_logs:ro
+    ports: ["127.0.0.1:3003:3003"]
+    depends_on:
+      data-dirs: {condition: service_completed_successfully}
+      dagster-postgres: {condition: service_healthy}
+    restart: unless-stopped
+
   loki:
     image: grafana/loki:3.5.0
     command: -config.file=/etc/loki/local-config.yaml
@@ -26,7 +99,9 @@ services:
       - ${DATA_DIR:-./data}/logs:/var/log/nyc-taxi:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports: ["127.0.0.1:12345:12345"]
-    depends_on: [loki]
+    depends_on:
+      loki: {condition: service_started}
+      data-dirs: {condition: service_completed_successfully}
     restart: unless-stopped
 
   pushgateway:
@@ -72,6 +147,8 @@ services:
 
   superset:
     build: ./superset
+    # Rebuilt (from cache) on every `docker compose up -d`, so a change in superset/ always applies.
+    pull_policy: build
     environment:
       SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:?set SUPERSET_SECRET_KEY in .env}
       SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER:-admin}
@@ -85,9 +162,12 @@ services:
       # Snowflake key pair of the service user (SNOWFLAKE_PRIVATE_KEY_PATH lives here on the host)
       - ${SNOWFLAKE_KEYS_DIR:-./data/keys}:/app/keys:ro
     ports: ["127.0.0.1:8090:8088"]
+    depends_on:
+      data-dirs: {condition: service_completed_successfully}
     restart: unless-stopped
 
 volumes:
+  dagster-postgres-data:
   loki-data:
   pushgateway-data:
   prometheus-data:
