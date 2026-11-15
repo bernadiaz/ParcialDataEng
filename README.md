@@ -123,6 +123,7 @@ snowflake/          setup.sql (warehouses, monitor, schemas, tags, role) + finop
 observability/      prometheus.yml, alloy/config.alloy, grafana provisioning + dashboards
 superset/           Dockerfile, config, bootstrap_dashboards.py (dashboards as code)
 tests/              pytest: quality rules, idempotency, reconciliation, schema
+docs/               Spanish project documentation (Documentacion_Pipeline_NYC_Taxi.docx)
 docker-compose.yml  observability + BI stack
 Makefile            the only command you need
 ```
