@@ -1,0 +1,128 @@
+# Target schema contract for NYC TLC yellow taxi trip records (Part 2).
+# Versioned on purpose: the pipeline never infers the target schema from the files.
+#
+# - Types are DuckDB types.
+# - Source names are normalized to snake_case (PULocationID -> pu_location_id). source_aliases
+#   makes the mapping explicit for TLC names that need it.
+# - required: the column must exist in every file. A missing required column fails the run
+#   before anything is loaded.
+# - required: false. The column may be absent and is filled with NULL. This is the case of
+#   cbd_congestion_fee in 2024: the charge did not exist, and 0 would mix "no charge" with
+#   "charge did not exist".
+# - nullable: false. NULLs are reported in the schema report; the quality rules decide what
+#   happens to the row.
+# - A column that is not in this contract is ignored and reported as a warning
+#   (unknown_columns). Airbyte metadata columns (_airbyte_*) are expected and ignored silently.
+# - When a source type differs from the contract the value is TRY_CAST, and the schema report
+#   counts the values that could not be cast.
+# Descriptions follow the TLC data dictionary (March 18, 2025).
+version: 1
+dataset: yellow_tripdata
+unknown_columns: ignore_with_warning
+ignored_column_prefixes: ["_airbyte_"]
+columns:
+  - name: vendor_id
+    type: INTEGER
+    required: true
+    nullable: false
+    source_aliases: [VendorID]
+    description: "TPEP provider: 1 Creative Mobile Technologies, 2 Curb Mobility, 6 Myle Technologies, 7 Helix."
+  - name: tpep_pickup_datetime
+    type: TIMESTAMP
+    required: true
+    nullable: false
+    description: Date and time when the meter was engaged (NYC local time, no time zone).
+  - name: tpep_dropoff_datetime
+    type: TIMESTAMP
+    required: true
+    nullable: false
+    description: Date and time when the meter was disengaged.
+  - name: passenger_count
+    type: BIGINT
+    required: true
+    nullable: true
+    description: Number of passengers (driver-entered; NULL on Flex Fare trips).
+  - name: trip_distance
+    type: DOUBLE
+    required: true
+    nullable: false
+    description: Elapsed trip distance in miles reported by the taximeter.
+  - name: ratecode_id
+    type: BIGINT
+    required: true
+    nullable: true
+    source_aliases: [RatecodeID]
+    description: "Final rate code: 1 Standard, 2 JFK, 3 Newark, 4 Nassau/Westchester, 5 Negotiated, 6 Group ride, 99 Null/unknown."
+  - name: store_and_fwd_flag
+    type: VARCHAR
+    required: true
+    nullable: true
+    description: "Y = record held in vehicle memory before sending (store and forward), N = not."
+  - name: pu_location_id
+    type: INTEGER
+    required: true
+    nullable: false
+    source_aliases: [PULocationID]
+    description: TLC Taxi Zone where the meter was engaged.
+  - name: do_location_id
+    type: INTEGER
+    required: true
+    nullable: false
+    source_aliases: [DOLocationID]
+    description: TLC Taxi Zone where the meter was disengaged.
+  - name: payment_type
+    type: BIGINT
+    required: true
+    nullable: false
+    description: "0 Flex Fare, 1 Credit card, 2 Cash, 3 No charge, 4 Dispute, 5 Unknown, 6 Voided trip."
+  - name: fare_amount
+    type: DOUBLE
+    required: true
+    nullable: false
+    description: Time-and-distance fare calculated by the meter (USD).
+  - name: extra
+    type: DOUBLE
+    required: true
+    nullable: false
+    description: Miscellaneous extras and surcharges.
+  - name: mta_tax
+    type: DOUBLE
+    required: true
+    nullable: false
+    description: Tax triggered by the metered rate in use.
+  - name: tip_amount
+    type: DOUBLE
+    required: true
+    nullable: false
+    description: Credit card tips only. Cash tips are not included.
+  - name: tolls_amount
+    type: DOUBLE
+    required: true
+    nullable: false
+    description: Total amount of all tolls paid in the trip.
+  - name: improvement_surcharge
+    type: DOUBLE
+    required: true
+    nullable: false
+    description: Improvement surcharge assessed at the flag drop.
+  - name: total_amount
+    type: DOUBLE
+    required: true
+    nullable: false
+    description: Total charged to passengers. Does not include cash tips.
+  - name: congestion_surcharge
+    type: DOUBLE
+    required: true
+    nullable: true
+    description: NYS congestion surcharge collected in the trip.
+  - name: airport_fee
+    type: DOUBLE
+    required: true
+    nullable: true
+    source_aliases: [Airport_fee]
+    description: Fee for pick up only at LaGuardia and JFK airports.
+  - name: cbd_congestion_fee
+    type: DOUBLE
+    required: false
+    nullable: true
+    description: Per-trip charge for MTA's Congestion Relief Zone starting Jan 5, 2025 (absent in 2024 files -> NULL).

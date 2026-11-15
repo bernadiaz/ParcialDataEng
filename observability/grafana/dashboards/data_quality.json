@@ -1,0 +1,61 @@
+{
+  "uid": "nyc-taxi-quality",
+  "title": "NYC Taxi - Data Quality",
+  "description": "Quality gate of the last run per month: rows read, accepted, quarantined, reconciliation and violations per rule.",
+  "tags": ["nyc-taxi", "quality"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "editable": false,
+  "refresh": "30s",
+  "time": {"from": "now-24h", "to": "now"},
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Reconciliation (read = accepted + quarantined)",
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "nyc_taxi_reconciled", "legendFormat": "{{mes}}", "instant": true}],
+      "fieldConfig": {"defaults": {
+        "mappings": [{"type": "value", "options": {"0": {"text": "FAILED", "color": "red"}, "1": {"text": "RECONCILED", "color": "green"}}}],
+        "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "none", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 2, "type": "stat", "title": "Quarantine share (% of rows read)",
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "100 * nyc_taxi_rows{outcome=\"quarantined\"} / ignoring(outcome) nyc_taxi_rows{outcome=\"read\"}", "legendFormat": "{{mes}}", "instant": true}],
+      "fieldConfig": {"defaults": {"unit": "percent", "decimals": 2,
+        "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 5}, {"color": "red", "value": 10}]}}, "overrides": []},
+      "options": {"colorMode": "value", "graphMode": "none", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 3, "type": "stat", "title": "Accepted rows with warnings (% of rows read)",
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "100 * nyc_taxi_rows{outcome=\"accepted_with_warnings\"} / ignoring(outcome) nyc_taxi_rows{outcome=\"read\"}", "legendFormat": "{{mes}}", "instant": true}],
+      "fieldConfig": {"defaults": {"unit": "percent", "decimals": 2, "color": {"mode": "fixed", "fixedColor": "orange"}}, "overrides": []},
+      "options": {"colorMode": "value", "graphMode": "none", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 4, "type": "bargauge", "title": "Rows per outcome and month",
+      "gridPos": {"h": 9, "w": 10, "x": 0, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sort_desc(nyc_taxi_rows)", "legendFormat": "{{mes}} {{outcome}}", "instant": true}],
+      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "palette-classic"}}, "overrides": []},
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 5, "type": "bargauge", "title": "Rows violating each rule (reject + warning), per month",
+      "gridPos": {"h": 14, "w": 14, "x": 10, "y": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sort_desc(nyc_taxi_rule_violations)", "legendFormat": "{{mes}} {{rule}} ({{severity}})", "instant": true}],
+      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "continuous-GrYlRd"}}, "overrides": []},
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 6, "type": "text", "title": "Rules",
+      "gridPos": {"h": 5, "w": 10, "x": 0, "y": 14},
+      "options": {"mode": "markdown", "content": "Reject: R01 pickup outside month, R02 dropoff <= pickup, R03 distance <= 0 or > 100 mi, R04 negative total, R06 unknown zone, R07 exact duplicate, R09 average speed > 80 mph.\n\nWarning (row kept, flagged): R05 passenger count NULL/0, R08 tip < 0 or > fare, R10 CBD fee anomaly.\n\nDefinitions: `contracts/quality_rules.yaml`."}
+    }
+  ]
+}

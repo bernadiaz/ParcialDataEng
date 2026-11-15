@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nyc-taxi-pipeline"
+version = "0.1.0"
+description = "Batch ELT for NYC TLC yellow taxi trips: Airbyte -> S3 -> DuckDB quality gate -> Snowflake + dbt."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb>=1.1",
+    "pyyaml>=6.0",
+    "boto3>=1.34",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "psutil>=5.9",
+    "prometheus-client>=0.20",
+    "snowflake-connector-python>=3.12",
+    "dbt-core>=1.9",
+    "dbt-snowflake>=1.9",
+    "dagster>=1.10",
+    "dagster-webserver>=1.10",
+    "dagster-dbt>=0.26",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "moto[s3]>=5",
+    # Offline target used to validate the dbt models without a Snowflake account
+    "dbt-duckdb>=1.9",
+]
+
+[tool.setuptools]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

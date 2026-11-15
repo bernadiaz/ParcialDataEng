@@ -1,0 +1,4 @@
+# Shell scripts run inside Linux containers: always LF, even when cloned on Windows.
+*.sh text eol=lf
+Makefile text eol=lf
+*.alloy text eol=lf

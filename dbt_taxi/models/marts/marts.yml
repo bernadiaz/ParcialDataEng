@@ -1,0 +1,56 @@
+version: 2
+
+models:
+  - name: fact_trips
+    description: >
+      Star schema fact. Grain: one row per accepted trip (one row of RAW.YELLOW_TRIPS). Incremental by
+      (year, month) with delete+insert. Measures in USD, miles and minutes.
+    columns:
+      - name: trip_key
+        description: md5(source_file || '#' || source_row_number). Stable across reprocesses.
+        data_tests: [unique, not_null]
+      - name: pickup_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+      - name: pu_location_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_zone')
+                field: location_id
+      - name: do_location_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_zone')
+                field: location_id
+      - name: duration_min
+        data_tests: [not_null]
+
+  - name: dim_zone
+    description: "Grain: one row per TLC LocationID (265 zones)."
+    columns:
+      - name: location_id
+        data_tests: [unique, not_null]
+
+  - name: dim_date
+    description: "Grain: one row per calendar day of each processed month."
+    columns:
+      - name: date_key
+        data_tests: [unique, not_null]
+
+  - name: agg_zone_hour
+    description: >
+      Grain: one row per (pickup zone, pickup date, pickup hour) with trips. Trips, total revenue
+      (sum of total_amount) and average duration in minutes.
+    columns:
+      - name: pu_location_id
+        data_tests: [not_null]
+      - name: trips
+        data_tests: [not_null]
