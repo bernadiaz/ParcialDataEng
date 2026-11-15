@@ -39,7 +39,7 @@ def main(argv: list[str]) -> int:
         if "--target" not in args and "-t" not in args and args and args[0] not in {"--version", "deps", "clean"}:
             args += ["--target", config.dbt_target()]  # same rule as make all (src/config.py)
         return subprocess.call([_executable("dbt"), *args])
-    port = argv[1] if len(argv) > 1 else "3003"
+    port = argv[1] if len(argv) > 1 else (os.environ.get("DAGSTER_UI_PORT", "").strip() or "3003")
     if _port_in_use(int(port)):
         # docker compose already serves the Dagster UI there, on the same run history as make all.
         print(f"The Dagster UI is already running at http://localhost:{port} (docker compose): open it in the browser.")

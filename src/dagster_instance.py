@@ -135,7 +135,7 @@ def configure(*, quiet: bool = False) -> str:
     if not quiet:
         if storage == "postgres":
             host, port = _pg_address()
-            log.info("Dagster run history: Postgres %s:%s (shown live at http://localhost:3003)", host, port)
+            log.info("Dagster run history: Postgres %s:%s (shown live in the Dagster UI of docker compose)", host, port)
         else:
             log.warning("Dagster run history: SQLite in %s. The Postgres of docker compose is not running, so the "
                         "Dagster UI in Docker will not show these runs (start it with `docker compose up -d`, or "
