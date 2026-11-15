@@ -1,6 +1,7 @@
 """Load step (DuckDB -> Snowflake RAW). Bridge between Part 3 and the dbt model.
 
-For each month, the curated Parquet written by DuckDB is loaded into RAW.YELLOW_TRIPS in a
+For each month, the curated Parquet written by DuckDB is loaded into RAW.YELLOW_TRIPS, and the
+quarantine Parquet (rejected rows with their violated rules) into RAW.YELLOW_QUARANTINE, each in a
 single transaction: the rows of that (year, month) are deleted, the file is loaded with COPY INTO
 from an internal stage, and the loaded rows are checked against the curated count. If anything
 fails the transaction rolls back, so reprocessing a month replaces only that month. The zone
@@ -31,11 +32,20 @@ log = get_logger("load")
 
 SNOWFLAKE_TYPES = {
     "INTEGER": "INTEGER", "BIGINT": "INTEGER", "SMALLINT": "SMALLINT", "DOUBLE": "FLOAT",
-    "VARCHAR": "VARCHAR", "TIMESTAMP": "TIMESTAMP_NTZ", "BOOLEAN": "BOOLEAN", "DATE": "DATE",
+    "VARCHAR": "VARCHAR", "TIMESTAMP": "TIMESTAMP_NTZ", "TIMESTAMPTZ": "TIMESTAMP_TZ", "BOOLEAN": "BOOLEAN",
+    "DATE": "DATE",
 }
 LINEAGE_COLUMNS = (
     ("source_file", "VARCHAR"), ("source_row_number", "BIGINT"), ("quality_flags", "VARCHAR"),
     ("year", "SMALLINT"), ("month", "SMALLINT"), ("run_id", "VARCHAR"),
+)
+
+
+# Quarantine = the original row (contract columns) + where it came from + why it was rejected.
+QUARANTINE_COLUMNS = (
+    ("source_file", "VARCHAR"), ("source_row_number", "BIGINT"), ("violated_rules", "VARCHAR"),
+    ("warning_flags", "VARCHAR"), ("year", "SMALLINT"), ("month", "SMALLINT"), ("run_id", "VARCHAR"),
+    ("quarantined_at", "TIMESTAMPTZ"),
 )
 
 
@@ -55,6 +65,12 @@ def trips_columns() -> list[tuple[str, str]]:
     """RAW.YELLOW_TRIPS columns, generated from the contract (single source of truth)."""
     contract = esquema.load_contract(esquema.YELLOW_CONTRACT)
     return [(c["name"], c["type"].upper()) for c in contract["columns"]] + list(LINEAGE_COLUMNS)
+
+
+def quarantine_columns() -> list[tuple[str, str]]:
+    """RAW.YELLOW_QUARANTINE columns: the contract (the row as read) plus source and violated rules."""
+    contract = esquema.load_contract(esquema.YELLOW_CONTRACT)
+    return [(c["name"], c["type"].upper()) for c in contract["columns"]] + list(QUARANTINE_COLUMNS)
 
 
 def zones_columns() -> list[tuple[str, str]]:
@@ -139,6 +155,8 @@ class SnowflakeWarehouse:
         zones = ",\n  ".join(f"{name.upper()} {SNOWFLAKE_TYPES[kind]}" for name, kind in zones_columns())
         self.execute(f"CREATE TABLE IF NOT EXISTS RAW.YELLOW_TRIPS (\n  {trips}\n)")
         self.execute(f"CREATE TABLE IF NOT EXISTS RAW.TAXI_ZONES (\n  {zones}\n)")
+        quarantine = ",\n  ".join(f"{name.upper()} {SNOWFLAKE_TYPES[kind]}" for name, kind in quarantine_columns())
+        self.execute(f"CREATE TABLE IF NOT EXISTS RAW.YELLOW_QUARANTINE (\n  {quarantine}\n)")
         self.execute(
             """CREATE TABLE IF NOT EXISTS RAW.LOAD_LOG (
                  RUN_ID VARCHAR, MES VARCHAR, TARGET_TABLE VARCHAR, SOURCE_FILE VARCHAR, SOURCE_SHA256 VARCHAR,
@@ -186,6 +204,10 @@ class SnowflakeWarehouse:
     def replace_zones(self, parquet: Path, expected: int) -> LoadResult:
         return self.replace("RAW.TAXI_ZONES", "static", parquet, "TRUE", {}, expected)
 
+    def replace_quarantine(self, month: Month, parquet: Path, expected: int) -> LoadResult:
+        return self.replace("RAW.YELLOW_QUARANTINE", month.label, parquet, "YEAR = %(year)s AND MONTH = %(month)s",
+                            {"year": month.year, "month": month.month}, expected)
+
 
 # --- DuckDB (offline validation target) ---------------------------------------------------------------
 class DuckDBWarehouse:
@@ -204,6 +226,8 @@ class DuckDBWarehouse:
         zones = ", ".join(f"{name} {kind}" for name, kind in zones_columns())
         self.conn.execute(f"CREATE TABLE IF NOT EXISTS raw.yellow_trips ({trips})")
         self.conn.execute(f"CREATE TABLE IF NOT EXISTS raw.taxi_zones ({zones})")
+        quarantine = ", ".join(f"{name} {kind}" for name, kind in quarantine_columns())
+        self.conn.execute(f"CREATE TABLE IF NOT EXISTS raw.yellow_quarantine ({quarantine})")
         self.conn.execute(
             """CREATE TABLE IF NOT EXISTS raw.load_log (run_id VARCHAR, mes VARCHAR, target_table VARCHAR,
                source_file VARCHAR, source_sha256 VARCHAR, rows_deleted BIGINT, rows_loaded BIGINT,
@@ -237,6 +261,10 @@ class DuckDBWarehouse:
     def replace_zones(self, parquet: Path, expected: int) -> LoadResult:
         return self.replace("raw.taxi_zones", "static", parquet, "TRUE", [], expected)
 
+    def replace_quarantine(self, month: Month, parquet: Path, expected: int) -> LoadResult:
+        return self.replace("raw.yellow_quarantine", month.label, parquet, "year = ? AND month = ?",
+                            [month.year, month.month], expected)
+
 
 def open_warehouse(settings: Settings) -> SnowflakeWarehouse | DuckDBWarehouse:
     return DuckDBWarehouse(settings) if settings.warehouse == "duckdb" else SnowflakeWarehouse()
@@ -256,8 +284,16 @@ def load_month(settings: Settings, warehouse: Any, month: Month) -> LoadResult:
     return warehouse.replace_month(month, parquet, parquet_rows(parquet))
 
 
+def load_quarantine(settings: Settings, warehouse: Any, month: Month) -> LoadResult:
+    parquet = settings.quarantine_month_dir(month) / "part-0.parquet"
+    if not parquet.exists():
+        raise LoadError(f"{parquet} not found: run `make quality MES={month}` first")
+    return warehouse.replace_quarantine(month, parquet, parquet_rows(parquet))
+
+
 def load_months(
-    settings: Settings, months: list[Month], warehouse: Any | None = None, *, include_zones: bool = True
+    settings: Settings, months: list[Month], warehouse: Any | None = None, *, include_zones: bool = True,
+    include_trips: bool = True, include_quarantine: bool = True,
 ) -> list[LoadResult]:
     own = warehouse is None
     warehouse = warehouse or open_warehouse(settings)
@@ -267,7 +303,10 @@ def load_months(
         if include_zones:
             results.append(load_zones(settings, warehouse))
         for month in months:
-            results.append(load_month(settings, warehouse, month))
+            if include_trips:
+                results.append(load_month(settings, warehouse, month))
+            if include_quarantine:
+                results.append(load_quarantine(settings, warehouse, month))
         for r in results:
             log.info("load %s %s: deleted=%s loaded=%s", r.table, r.mes, f"{r.rows_deleted:,}", f"{r.rows_loaded:,}")
             labels = {"table": r.table.lower(), "warehouse": settings.warehouse}
@@ -290,6 +329,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with track_step(settings, f"load-{settings.warehouse}", ",".join(m.label for m in months)):
             load_months(settings, months)
+            from src.calidad import publish_quarantine  # make all-steps: same lake copy as the Dagster asset
+
+            for month in months:
+                publish_quarantine(settings, month)
     except LoadError as exc:
         log.error("%s", exc)
         return 1

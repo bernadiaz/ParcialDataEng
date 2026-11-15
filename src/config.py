@@ -223,6 +223,7 @@ class Settings:
     s3_raw_prefix: str
     duckdb_memory_limit: str
     duckdb_threads: int
+    s3_quarantine_prefix: str = "quarantine"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -242,6 +243,7 @@ class Settings:
             s3_raw_prefix=_env("S3_RAW_PREFIX", "raw").strip("/"),
             duckdb_memory_limit=resolve_memory_limit(_env("DUCKDB_MEMORY_LIMIT")),
             duckdb_threads=resolve_threads(_env("DUCKDB_THREADS")),
+            s3_quarantine_prefix=_env("S3_QUARANTINE_PREFIX", "quarantine").strip("/") or "quarantine",
         )
 
     @property

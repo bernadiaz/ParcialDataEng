@@ -54,3 +54,14 @@ models:
         data_tests: [not_null]
       - name: trips
         data_tests: [not_null]
+
+  - name: agg_quarantine_rule
+    description: >
+      Grain: one row per (year, month, violated reject rule) of RAW.YELLOW_QUARANTINE. A quarantined row
+      can violate several rules, so the counts of a month overlap. Feeds the Data Quality & Quarantine
+      dashboard.
+    columns:
+      - name: rule_id
+        data_tests: [not_null]
+      - name: quarantined_rows
+        data_tests: [not_null]
