@@ -1,20 +1,24 @@
-"""Dagster orchestration of the pipeline. `make all` runs it; `make dagster-ui` opens the UI.
+"""Dagster orchestration of the pipeline. `make all` runs it; the UI is http://localhost:3003.
 
 Asset graph (monthly partitions, key = YYYY-MM):
 
     taxi_zone_lookup ─┐
     raw_yellow_trips ─┴─> yellow_schema_report ─> curated_yellow_trips ─> raw/yellow_trips ─┐
-                                                   (asset check: reconciliation)            ├─> dbt models
-    curated zones ─────────────────────────────────────────────────────> raw/taxi_zones ───┘   (staging ->
-                                                                                                marts) ─> resultados_md
+                                                   (asset check: reconciliation)            ├─> dbt models ─┬─> resultados_md
+    taxi_zone_lookup ──────────────────────────────────────────────────> raw/taxi_zones ───┘   (staging ->  └─> superset_dashboards
+                                                                                                marts)
 
 raw/yellow_trips and raw/taxi_zones are the warehouse tables loaded by src/load_snowflake.py.
 They share their asset keys with the dbt sources, so the lineage continues into the dbt models.
 Each step keeps its own module (src/*.py). Dagster adds partitions, run history, lineage and
 asset checks, and the steps still run one by one from the Makefile.
 
+`make all` materializes every asset, in order, so the whole lineage ends up green. The run history
+goes to the Postgres of docker compose (src/dagster_instance.py), which the Dagster UI container
+reads, so http://localhost:3003 shows each run as soon as it finishes.
+
     python -m src.orchestration --mes 2025-01      # the month and the same month of the previous year
-    dagster dev -m src.orchestration -p 3001       # UI
+    python -m src.run_tool dagster-ui 3003         # local UI, only when docker compose is not running
 
 No `from __future__ import annotations` here: Dagster inspects the real type of `context`.
 """
@@ -24,7 +28,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from src.config import ROOT, Month, Settings, months_for, track_step
+from src.config import ROOT, Month, Settings, dbt_target, months_for, track_step
 
 os.environ.setdefault("DAGSTER_HOME", str(Settings.from_env().data_dir / "dagster_home"))
 os.environ.setdefault("DUCKDB_WAREHOUSE_PATH", str(Settings.from_env().warehouse_db))  # dbt duckdb target
@@ -49,7 +53,7 @@ from dagster import (  # noqa: E402
 )
 from dagster_dbt import DbtCliResource, DbtProject, dbt_assets, get_asset_key_for_model  # noqa: E402
 
-from src import calidad, esquema, load_snowflake, resultados  # noqa: E402
+from src import calidad, dagster_instance, dashboards, esquema, load_snowflake, resultados  # noqa: E402
 from src.ingesta_airbyte import Ingestor, IngestionLog  # noqa: E402
 
 DBT_DIR = ROOT / "dbt_taxi"
@@ -60,15 +64,14 @@ MONTHLY = DynamicPartitionsDefinition(name="months")
 
 
 def _target() -> str:
-    if os.environ.get("DBT_TARGET"):
-        return os.environ["DBT_TARGET"]
-    if os.environ.get("WAREHOUSE", "snowflake").lower() == "duckdb":
-        return "duckdb"
-    return "snowflake_keypair" if os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH", "").strip() else "snowflake_browser"
+    return dbt_target()
 
 
 DBT_EXE = str(Path(sys.executable).with_name("dbt.exe" if os.name == "nt" else "dbt"))  # dbt of this .venv
-DBT_PROJECT = DbtProject(project_dir=DBT_DIR, profiles_dir=DBT_DIR, target=_target())
+# DBT_TARGET_PATH lets the Dagster UI container keep its own manifest instead of writing into the
+# repository it mounts read only. On the host it is dbt's default, dbt_taxi/target.
+DBT_PROJECT = DbtProject(project_dir=DBT_DIR, profiles_dir=DBT_DIR, target=_target(),
+                         target_path=Path(os.environ.get("DBT_TARGET_PATH", "").strip() or "target"))
 
 
 def _manifest_is_stale() -> bool:
@@ -213,8 +216,24 @@ def resultados_md(context: AssetExecutionContext, config: QuestionsConfig) -> Ma
     return MaterializeResult(metadata={"path": MetadataValue.path(str(path))})
 
 
+@asset(group_name="analytics", kinds={"superset"},
+       deps=[get_asset_key_for_model([dbt_models], name) for name in ("fact_trips", "agg_zone_hour", "dim_zone", "dim_date")],
+       description="The 6 Superset dashboards (English) on the marts, created or updated through the Superset API "
+                   "(Snowflake, or the offline DuckDB copy when WAREHOUSE=duckdb).")
+def superset_dashboards(context: AssetExecutionContext, config: QuestionsConfig) -> MaterializeResult:
+    settings = _settings()
+    with track_step(settings, "dashboards", config.mes):
+        summary = dashboards.build(settings, Month.parse(config.mes))
+    return MaterializeResult(metadata={
+        "superset": MetadataValue.url(dashboards.superset_url()),
+        "database": summary["database"],
+        "datasets": summary["datasets"],
+        "dashboards": MetadataValue.json(summary["dashboards"]),
+    })
+
+
 MONTHLY_ASSETS = [raw_yellow_trips, yellow_schema_report, curated_yellow_trips, warehouse_raw_yellow_trips]
-ALL_ASSETS = [taxi_zone_lookup, *MONTHLY_ASSETS, warehouse_raw_taxi_zones, dbt_models, resultados_md]
+ALL_ASSETS = [taxi_zone_lookup, *MONTHLY_ASSETS, warehouse_raw_taxi_zones, dbt_models, resultados_md, superset_dashboards]
 RESOURCES = {"dbt": DbtCliResource(project_dir=DBT_PROJECT, profiles_dir=str(DBT_DIR), target=_target(),
                                    dbt_executable=DBT_EXE)}
 
@@ -222,11 +241,11 @@ defs = Definitions(
     assets=ALL_ASSETS,
     resources=RESOURCES,
     jobs=[
-        define_asset_job("monthly_pipeline", AssetSelection.assets(*MONTHLY_ASSETS), partitions_def=MONTHLY,
+        define_asset_job("monthly_pipeline", AssetSelection.assets(*MONTHLY_ASSETS),
                          description="ingest -> schema -> quality -> load for one month"),
         define_asset_job("reference_data", AssetSelection.assets(taxi_zone_lookup, warehouse_raw_taxi_zones)),
-        define_asset_job("warehouse_models", AssetSelection.assets(dbt_models, resultados_md),
-                         description="dbt build + RESULTADOS.md"),
+        define_asset_job("warehouse_models", AssetSelection.assets(dbt_models, resultados_md, superset_dashboards),
+                         description="dbt build + RESULTADOS.md + Superset dashboards"),
     ],
 )
 
@@ -239,12 +258,15 @@ def register_months(instance: DagsterInstance, labels: list[str]) -> None:
 
 
 def run(mes: str) -> int:
-    """make all: zones, each month (partition), zones load, dbt and questions. One Dagster run each."""
+    """make all: zones, each month (partition), zones load, dbt + questions, dashboards. One Dagster run each."""
+    storage = dagster_instance.configure()
     instance = DagsterInstance.get()
     months = months_for(mes)
     register_months(instance, [m.label for m in months])
     os.environ["DBT_MONTHS"] = ",".join(m.label for m in months)
     os.environ["MES"] = mes
+    ui = "http://localhost:3003" if storage == "postgres" else "`make dagster-ui` (http://localhost:3003)"
+    mes_config = {"config": {"mes": mes}}
 
     def step(selection: list, partition_key: str | None = None, run_config: dict | None = None) -> bool:
         result = materialize(ALL_ASSETS, selection=AssetSelection.assets(*selection), partition_key=partition_key, instance=instance,
@@ -252,17 +274,26 @@ def run(mes: str) -> int:
                              tags={"mes": mes})
         return result.success
 
+    def dashboards_step() -> bool:
+        if not dashboards.superset_expected():
+            print(f"Superset is not running ({dashboards.superset_url()}): dashboards skipped. Start the stack with "
+                  "`docker compose up -d` and run `make all` again (or `make superset-dashboards`).", file=sys.stderr)
+            return True
+        return step([superset_dashboards], run_config={"ops": {"superset_dashboards": mes_config}})
+
     plan = [(lambda: step([taxi_zone_lookup]))]
     plan += [(lambda m=m: step(MONTHLY_ASSETS, partition_key=m.label)) for m in months]
     plan += [
         lambda: step([warehouse_raw_taxi_zones]),
-        lambda: step([dbt_models, resultados_md], run_config={"ops": {"resultados_md": {"config": {"mes": mes}}}}),
+        lambda: step([dbt_models, resultados_md], run_config={"ops": {"resultados_md": mes_config}}),
+        dashboards_step,
     ]
     for action in plan:
         if not action():
-            print("Dagster run failed: open `make dagster-ui` (Runs) for the step logs.", file=sys.stderr)
+            print(f"Dagster run failed: open {ui} (Runs) for the step logs.", file=sys.stderr)
             return 1
-    print(f"Pipeline finished for {', '.join(m.label for m in months)}. Runs are in the Dagster UI (make dagster-ui).")
+    print(f"Pipeline finished for {', '.join(m.label for m in months)}. Dagster: {ui} | "
+          f"Superset: {dashboards.superset_url()} | Grafana: http://localhost:3002")
     return 0
 
 
