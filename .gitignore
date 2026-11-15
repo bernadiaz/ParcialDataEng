@@ -1,0 +1,33 @@
+# Secrets: credentials live only in .env and local profiles (~/.aws, keys), never in git
+.env
+.env.*
+!.env.example
+*.p8
+*.pem
+*.key
+.snowflake/
+
+# Data and generated artifacts
+data/
+build/
+airbyte/state/
+dbt_taxi/target/
+dbt_taxi/logs/
+dbt_taxi/dbt_packages/
+dbt_taxi/.user.yml
+logs/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# IDEs and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

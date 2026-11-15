@@ -1,0 +1,28 @@
+# Contract for the TLC taxi zone lookup (taxi_zone_lookup.csv). Same rules as yellow_schema.yaml.
+# location_id must be unique: R06 and the zone enrichment join on it, and a duplicate would
+# multiply trips and break the reconciliation.
+version: 1
+dataset: taxi_zone_lookup
+unknown_columns: ignore_with_warning
+ignored_column_prefixes: ["_airbyte_"]
+primary_key: [location_id]
+columns:
+  - name: location_id
+    type: INTEGER
+    required: true
+    nullable: false
+    source_aliases: [LocationID]
+  - name: borough
+    type: VARCHAR
+    required: true
+    nullable: true
+    source_aliases: [Borough]
+  - name: zone
+    type: VARCHAR
+    required: true
+    nullable: true
+    source_aliases: [Zone]
+  - name: service_zone
+    type: VARCHAR
+    required: true
+    nullable: true

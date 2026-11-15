@@ -1,0 +1,38 @@
+name: nyc_taxi
+version: "1.0.0"
+config-version: 2
+profile: nyc_taxi
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+# FinOps (plan section 3):
+# - staging = views, intermediate = ephemeral: no storage and no rebuild cost.
+# - fact_trips and agg_zone_hour are incremental by (year, month). make passes the months being
+#   processed in DBT_MONTHS. A pre-hook deletes those months, and the run appends them again.
+# - dims are small tables, rebuilt each run.
+# - Snowflake: STAGING is a TRANSIENT schema (snowflake/setup.sql), so dbt's temporary tables
+#   have no Fail-safe. Marts stay permanent (Time Travel).
+# - Every query carries query_tag project/env/owner (profiles.yml) for cost attribution.
+# - No clustering keys: about 6.4M rows do not need them (avoid premature clustering).
+models:
+  nyc_taxi:
+    staging:
+      +schema: staging
+      +materialized: view
+      +meta: {dagster: {group: staging}}       # asset group in the Dagster lineage
+    intermediate:
+      +schema: staging
+      +materialized: ephemeral
+    marts:
+      +schema: marts
+      +materialized: table
+      +transient: false
+      +meta: {dagster: {group: marts}}
+
+data_tests:
+  nyc_taxi:
+    +severity: error
