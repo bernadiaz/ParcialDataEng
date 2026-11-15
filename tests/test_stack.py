@@ -9,7 +9,7 @@ import pytest
 from moto import mock_aws
 
 from src import clean, dagster_instance, dashboards, ingesta_airbyte
-from src.config import Settings, dbt_target
+from src.config import Settings, dbt_target, duckdb_config, resolve_memory_limit, resolve_threads
 from src.ingesta_airbyte import IngestionError, Ingestor
 from tests.conftest import JAN_2025, ZONES_CSV
 
@@ -66,6 +66,47 @@ def test_dbt_target_follows_the_warehouse(monkeypatch, env, expected):
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     assert dbt_target() == expected
+
+
+# --- memory budget (8 GB laptops) ----------------------------------------------------------------------------
+@pytest.mark.parametrize("total_gib, expected", [(4, "1024MiB"), (8, "2048MiB"), (16, "4096MiB"), (64, "4096MiB")])
+def test_auto_duckdb_memory_is_a_quarter_of_the_ram(total_gib, expected):
+    assert resolve_memory_limit("auto", total_gib * 1024**3) == expected
+    assert resolve_memory_limit("", total_gib * 1024**3) == expected
+
+
+def test_explicit_duckdb_settings_are_kept():
+    assert resolve_memory_limit("3GB", 8 * 1024**3) == "3GB"
+    assert resolve_threads("6") == 6
+    assert resolve_threads("auto", cpus=2) == 2
+    assert resolve_threads("auto", cpus=16) == 4
+
+
+def test_every_duckdb_connection_gets_the_budget():
+    config = duckdb_config()
+    assert config["memory_limit"] and config["temp_directory"] and config["preserve_insertion_order"] == "false"
+
+
+def test_airbyte_is_not_started_without_enough_free_ram(monkeypatch):
+    calls: list[list[str]] = []
+
+    class Done:
+        def __init__(self, stdout=""):
+            self.returncode, self.stdout = 0, stdout
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return Done("false")                                   # abctl installed, container stopped
+
+    monkeypatch.setattr(ingesta_airbyte.shutil, "which", lambda name: "/usr/bin/docker")
+    monkeypatch.setattr(ingesta_airbyte.subprocess, "run", fake_run)
+    monkeypatch.setattr(ingesta_airbyte, "available_memory_mb", lambda: 3000)   # an 8 GB laptop in use
+    assert ingesta_airbyte.start_local_airbyte("http://localhost:8000/api/public/v1") == 0.0
+    assert not any("start" in cmd for cmd in calls)
+
+    monkeypatch.setattr(ingesta_airbyte, "available_memory_mb", lambda: 9000)
+    assert ingesta_airbyte.start_local_airbyte("http://localhost:8000/api/public/v1") > 0
+    assert ["docker", "start", ingesta_airbyte.ABCTL_CONTAINER] in calls
 
 
 # --- ingestion ---------------------------------------------------------------------------------------------

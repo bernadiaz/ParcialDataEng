@@ -10,7 +10,15 @@
 #   Postgres    127.0.0.1:5434          Dagster run history, shared by `make all` and the Dagster UI
 # Secrets come from .env. Images are pinned to exact versions. Ports bind to 127.0.0.1 only and avoid
 # the ports of other local stacks (3000/3001/8088/8089, and 5432/5433 of a local PostgreSQL).
+#
+# Sized for laptops with 8 GB of RAM: the whole stack idles at about 1.1 GB and peaked at 1.3 GB while
+# make all built the dashboards. Each service has a memory limit of about twice its measured peak, so
+# a runaway container is restarted instead of freezing the laptop, and Docker logs are rotated.
 name: nyc-taxi
+
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "10m", max-file: "3"}
 
 services:
   # One-shot: creates the DATA_DIR folders that the containers mount, owned by whoever cloned the
@@ -18,6 +26,7 @@ services:
   # `make all` (run as your user) could no longer write to DATA_DIR. On Docker Desktop (Windows,
   # macOS) it changes nothing.
   data-dirs:
+    logging: *logging
     image: busybox:1.37.0
     volumes:
       - ${DATA_DIR:-./data}:/data
@@ -34,6 +43,8 @@ services:
     restart: "no"
 
   dagster-postgres:
+    logging: *logging
+    mem_limit: 384m
     image: postgres:17.11-alpine
     environment:
       POSTGRES_USER: ${DAGSTER_PG_USER:-dagster}
@@ -51,6 +62,8 @@ services:
   # Dagster UI. `make all` runs on the host and writes each run to dagster-postgres; this UI reads the
   # same history, so the lineage turns green as the runs finish. Read only: runs start from `make all`.
   dagster:
+    logging: *logging
+    mem_limit: 1g
     build:
       context: .
       dockerfile: dagster/Dockerfile
@@ -85,6 +98,8 @@ services:
     restart: unless-stopped
 
   loki:
+    logging: *logging
+    mem_limit: 384m
     image: grafana/loki:3.5.0
     command: -config.file=/etc/loki/local-config.yaml
     ports: ["127.0.0.1:3100:3100"]
@@ -92,6 +107,8 @@ services:
     restart: unless-stopped
 
   alloy:
+    logging: *logging
+    mem_limit: 256m
     image: grafana/alloy:v1.10.0
     command: run --server.http.listen-addr=0.0.0.0:12345 --storage.path=/var/lib/alloy/data /etc/alloy/config.alloy
     volumes:
@@ -105,6 +122,8 @@ services:
     restart: unless-stopped
 
   pushgateway:
+    logging: *logging
+    mem_limit: 128m
     image: prom/pushgateway:v1.11.1
     # The Pushgateway keeps metrics in memory. The persistence file (saved every 30 s and on shutdown)
     # keeps the last pushed values across container restarts and reboots, so Grafana is not empty
@@ -115,6 +134,8 @@ services:
     restart: unless-stopped
 
   prometheus:
+    logging: *logging
+    mem_limit: 512m
     image: prom/prometheus:v3.5.0
     # external-url: the endpoint links of Status > Target health use the browser's address
     # (localhost:9090), not the container id. retention.size caps the disk use.
@@ -131,6 +152,8 @@ services:
     restart: unless-stopped
 
   grafana:
+    logging: *logging
+    mem_limit: 384m
     image: grafana/grafana:12.1.0
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
@@ -146,12 +169,16 @@ services:
     restart: unless-stopped
 
   dozzle:
+    logging: *logging
+    mem_limit: 128m
     image: amir20/dozzle:v8.13.0
     volumes: [/var/run/docker.sock:/var/run/docker.sock:ro]
     ports: ["127.0.0.1:8081:8080"]
     restart: unless-stopped
 
   superset:
+    logging: *logging
+    mem_limit: 1536m
     build: ./superset
     # Rebuilt (from cache) on every `docker compose up -d`, so a change in superset/ always applies.
     pull_policy: build
@@ -159,6 +186,11 @@ services:
       SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:?set SUPERSET_SECRET_KEY in .env}
       SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER:-admin}
       SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD:?set SUPERSET_ADMIN_PASSWORD in .env}
+      # One gunicorn worker (the image default) with fewer threads: enough for one person opening a
+      # dashboard, and lighter on RAM. Snowflake can take a while to resume a suspended warehouse.
+      SERVER_WORKER_AMOUNT: "1"
+      SERVER_THREADS_AMOUNT: "10"
+      GUNICORN_TIMEOUT: "180"
     volumes:
       # Superset metadata (dashboards, charts, datasets, connections) in a host folder: it survives
       # container restarts, `docker compose down -v`, volume prunes, Docker resets and reboots.

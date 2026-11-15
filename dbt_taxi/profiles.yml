@@ -38,3 +38,11 @@ nyc_taxi:
       path: "{{ env_var('DUCKDB_WAREHOUSE_PATH', 'data/warehouse/nyc_taxi.duckdb') }}"
       schema: staging
       threads: 4
+      # Same memory budget as the rest of the pipeline (src/config.py resolves DUCKDB_MEMORY_LIMIT=auto
+      # to a quarter of the RAM): without it DuckDB would take 80% of the RAM of an 8 GB laptop. It
+      # spills to nyc_taxi.duckdb.tmp next to the warehouse file. temp_directory is not set here:
+      # dbt-duckdb applies settings on every connection, and DuckDB refuses to change it once used.
+      settings:
+        memory_limit: "{{ env_var('DUCKDB_MEMORY_LIMIT', '2GB') }}"
+        threads: "{{ env_var('DUCKDB_THREADS', '4') }}"
+        preserve_insertion_order: false
