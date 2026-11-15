@@ -288,7 +288,8 @@ def run(mes: str) -> int:
     register_months(instance, [m.label for m in months])
     os.environ["DBT_MONTHS"] = ",".join(m.label for m in months)
     os.environ["MES"] = mes
-    ui = "http://localhost:3003" if storage == "postgres" else "`make dagster-ui` (http://localhost:3003)"
+    dagster_url = f"http://localhost:{os.environ.get('DAGSTER_UI_PORT', '').strip() or '3003'}"
+    ui = dagster_url if storage == "postgres" else f"`make dagster-ui` ({dagster_url})"
     mes_config = {"config": {"mes": mes}}
 
     def step(selection: list, partition_key: str | None = None, run_config: dict | None = None) -> bool:
@@ -315,9 +316,26 @@ def run(mes: str) -> int:
         if not action():
             print(f"Dagster run failed: open {ui} (Runs) for the step logs.", file=sys.stderr)
             return 1
-    print(f"Pipeline finished for {', '.join(m.label for m in months)}. Dagster: {ui} | "
-          f"Superset: {dashboards.superset_url()} | Grafana: http://localhost:3002")
+    print(f"Pipeline finished for {', '.join(m.label for m in months)}.")
+    _print_stack_status()
     return 0
+
+
+def _print_stack_status() -> None:
+    """Where to look now, and whether each UI really answers (a UI that does not is explained by make status)."""
+    from src import stack_status
+
+    try:
+        statuses = stack_status.check_all()
+    except Exception:  # noqa: BLE001 - Docker not installed or not running: the pipeline itself succeeded
+        print("Docker stack not running: start it with `docker compose up -d` to see Dagster, Grafana and Superset.")
+        return
+    for status in statuses:
+        if status.service.name in {"dagster", "grafana", "superset", "prometheus", "dozzle"}:
+            mark = "OK  " if status.ok else "FAIL"
+            print(f"  {mark} {status.service.title:11s} {status.service.url}  {'' if status.ok else status.state}")
+    if not all(s.ok for s in statuses):
+        print("Some services are not answering: run `make status` to see why and how to fix it.")
 
 
 def main(argv: list[str] | None = None) -> int:

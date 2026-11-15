@@ -52,7 +52,7 @@ export DBT_MONTHS = $(subst $(space),$(comma),$(strip $(MONTHS)))
 DBT_ARGS = --project-dir dbt_taxi --profiles-dir dbt_taxi
 
 .DEFAULT_GOAL := help
-.PHONY: help install all all-steps dagster-ui up down superset-dashboards airbyte-setup airbyte-sync schema \
+.PHONY: help install all all-steps dagster-ui up down status superset-dashboards airbyte-setup airbyte-sync schema \
         quality load-sf dbt-run dbt-docs questions test explore demo-idempotency show-quarantine quality-report \
         finops clean
 
@@ -77,10 +77,14 @@ all-steps: $(VENV) airbyte-sync schema quality load-sf dbt-run questions ## same
 	@echo "Pipeline finished for $(MONTHS) (run $(RUN_ID))"
 
 dagster-ui: $(VENV) ## Dagster UI on http://localhost:3003 (already served by docker compose when the stack is up)
-	$(PY) -m src.run_tool dagster-ui 3003
+	$(PY) -m src.run_tool dagster-ui
 
-up: ## start the Dagster UI, Grafana, Prometheus, Pushgateway, Loki, Alloy, Dozzle and Superset (docker compose)
-	docker compose up -d --build
+up: $(VENV) ## start the stack (docker compose up -d --build) and wait until every UI answers, or say why not
+	-docker compose up -d --build
+	$(PY) -m src.stack_status --wait 600
+
+status: $(VENV) ## is every UI reachable? If not, why (port taken or reserved by Windows, stopped, out of memory) and how to fix it
+	$(PY) -m src.stack_status
 
 down: ## stop the docker compose stack (volumes are kept)
 	docker compose down
