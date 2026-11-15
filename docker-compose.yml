@@ -116,7 +116,13 @@ services:
 
   prometheus:
     image: prom/prometheus:v3.5.0
-    command: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.retention.time=30d]
+    # external-url: the endpoint links of Status > Target health use the browser's address
+    # (localhost:9090), not the container id. retention.size caps the disk use.
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.size=512MB
+      - --web.external-url=http://localhost:9090/
     volumes:
       - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
