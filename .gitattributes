@@ -2,3 +2,6 @@
 *.sh text eol=lf
 Makefile text eol=lf
 *.alloy text eol=lf
+
+# Office documents are ZIP archives: never convert line endings or try a text diff.
+*.docx binary
