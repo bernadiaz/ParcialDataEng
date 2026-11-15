@@ -40,36 +40,50 @@ The month is a parameter everywhere. `MES=2025-01` processes 2025-01 and 2024-01
 
 ## 1. Quick start
 
-Requirements: Python 3.12+, GNU make (on Windows run it from Git Bash), Docker Desktop, an AWS
+Requirements: Python 3.12+, GNU make (on Windows run it from Git Bash), Docker (Docker Desktop on
+Windows and macOS, Docker Engine with the Compose plugin on Linux). The cloud mode also needs an AWS
 account with an S3 bucket, a Snowflake account and Airbyte (`abctl`).
 
 ```bash
 git clone https://github.com/bernadiaz/ParcialDataEng.git && cd ParcialDataEng
 cp .env.example .env              # fill in the values (section 4)
-make install                      # .venv + dependencies (PYTHON="py -3.13" to pick another interpreter)
-make up                           # Grafana, Prometheus, Pushgateway, Loki, Alloy, Dozzle, Superset
-make all MES=2025-01              # the whole pipeline for 2025-01 and 2024-01 (Dagster); creates the
-                                  # Airbyte source/destination/connections automatically if missing
-make superset-dashboards MES=2025-01
+docker compose up -d              # Dagster UI, Grafana, Prometheus, Pushgateway, Loki, Alloy, Dozzle, Superset
+make all MES=2025-01              # cloud mode: the whole pipeline for 2025-01 and 2024-01
 ```
 
 **Without cloud accounts** (graders, CI, laptop on a plane): the same pipeline runs end to end
-locally. Ingestion downloads the files from the TLC CDN, and the warehouse is a local DuckDB file
-that dbt and the questions use instead of Snowflake:
+locally. Ingestion downloads the files from the TLC CDN (S3 is skipped), and the warehouse is a local
+DuckDB file that dbt, the questions and Superset use instead of Snowflake:
 
 ```bash
+docker compose up -d
 make all MES=2025-01 INGEST_MODE=direct WAREHOUSE=duckdb
 ```
 
+Those two commands are the whole run, on Windows, Linux and macOS. `make all`:
+- creates `.venv` and installs the project the first time, with the first Python 3.12+ it finds
+  (`make install` is optional, and it runs again by itself when `pyproject.toml` changes);
+- runs every step through Dagster: ingestion, schema, quality, load, dbt, the six questions
+  (`RESULTADOS.md`) and the **Superset dashboards**, so no other command is needed;
+- writes the Dagster run history to the Postgres of docker compose, so the lineage at
+  http://localhost:3003 shows every asset green as the runs finish.
+
+In cloud mode, if Airbyte is stopped (for example after a reboot), the pipeline starts abctl's
+container and waits for it. If Airbyte still does not answer, the zone lookup is downloaded from the
+TLC and uploaded unmodified to the same S3 prefix (`AIRBYTE_FALLBACK=direct`, logged as
+`mode=direct`).
+
 | UI | URL | What |
 |---|---|---|
-| Dagster | http://localhost:3003 (`make dagster-ui`) | asset lineage, monthly partitions, runs, reconciliation check |
+| Dagster | http://localhost:3003 | asset lineage, monthly partitions, runs, reconciliation check (read only: runs start from `make all`) |
 | Grafana | http://localhost:3002 | *Pipeline Health & Logs*, *Data Quality* |
-| Superset | http://localhost:8090 | 6 business dashboards (English) |
+| Superset | http://localhost:8090 | 6 business dashboards (English), built by `make all` |
 | Dozzle | http://localhost:8081 | live container logs |
 | Prometheus | http://localhost:9090 | metrics (from the Pushgateway, :9091) |
 
-Ports bind to `127.0.0.1` and avoid 3000/3001/8088/8089, which other local stacks often use.
+Ports bind to `127.0.0.1` and avoid 3000/3001/8088/8089, which other local stacks often use. The
+Dagster Postgres listens on `127.0.0.1:5434` (not 5432/5433, which a local PostgreSQL usually takes;
+`DAGSTER_PG_PORT` in `.env` changes it).
 
 ---
 
@@ -116,22 +130,26 @@ Why each tool:
 contracts/          yellow_schema.yaml, taxi_zone_schema.yaml, quality_rules.yaml (versioned, not in code)
 airbyte/            connections/*.yaml (versioned Airbyte config, no secrets) + README_AIRBYTE.md
 src/                config, ingesta_airbyte, esquema, calidad, load_snowflake, resultados,
-                    orchestration (Dagster), observability, exploracion, demos
+                    orchestration (Dagster), dagster_instance (shared run history), dashboards
+                    (Superset as code), observability, exploracion, demos, clean
 dbt_taxi/           dbt project: staging (views), intermediate (ephemeral), marts, tests, macros
 sql/                q1..q6 (one query per file) + interpretations.yaml
 snowflake/          setup.sql (warehouses, monitor, schemas, tags, role) + finops.sql
 observability/      prometheus.yml, alloy/config.alloy, grafana provisioning + dashboards
-superset/           Dockerfile, config, bootstrap_dashboards.py (dashboards as code)
-tests/              pytest: quality rules, idempotency, reconciliation, schema
+superset/           Dockerfile, config, first-start script
+dagster/            Dockerfile + entrypoint of the Dagster UI container
+tests/              pytest: quality rules, idempotency, reconciliation, schema, two-command run
 docs/               Spanish project documentation (Documentacion_Pipeline_NYC_Taxi.docx)
-docker-compose.yml  observability + BI stack
+docker-compose.yml  Dagster UI + its Postgres, observability and BI stack
 Makefile            the only command you need
 ```
 
 `data/` (or `DATA_DIR`) holds raw mirrors, curated, quarantine, reports, logs and the control
-database. It also holds Dagster's run history (`dagster_home`) and Superset's metadata
-(`superset_home`). It is gitignored. `make clean` empties it but keeps `superset_home`, so the
-dashboards are not lost.
+database. It also holds Superset's metadata (`superset_home`) and, without Docker, Dagster's run
+history (`dagster_home`). It is gitignored. `make clean` empties it, wipes the Dagster history and
+keeps `superset_home`, so the dashboards are not lost. On Linux, the one-shot `data-dirs` service of
+docker compose creates the folders that the containers mount, owned by your user. Otherwise Docker
+would create them as root, and `make all` could not write to `DATA_DIR`.
 
 ---
 
@@ -151,8 +169,10 @@ docker compose expands `~` in its volumes. For example, `DATA_DIR=~/nyc_taxi_dat
 | Variable | Purpose |
 |---|---|
 | `WAREHOUSE` | `snowflake` (default) or `duckdb` (offline) |
-| `INGEST_MODE` | `airbyte` (default) or `direct` (TLC CDN fallback) |
-| `DATA_DIR` | local data folder (default `./data`). Keep it out of OneDrive/Dropbox/iCloud, because sync clients lock DuckDB files. Dagster's run history goes to `DATA_DIR/dagster_home` |
+| `INGEST_MODE` | `hybrid` (template: Airbyte for the zones, months streamed to S3), `airbyte` or `direct` (TLC CDN). `direct` + `WAREHOUSE=duckdb` is the offline mode and skips S3 |
+| `DATA_DIR` | local data folder (default `./data`). Keep it out of OneDrive/Dropbox/iCloud, because sync clients lock DuckDB files |
+| `DAGSTER_PG_*`, `DAGSTER_STORAGE` | Postgres of docker compose that holds the Dagster run history (port 5434 by default). Without Docker the history falls back to SQLite in `DATA_DIR/dagster_home` |
+| `AIRBYTE_FALLBACK` | `direct` (default): if Airbyte does not answer, download from the TLC to the same S3 prefix. `fail` stops the run |
 | `AWS_PROFILE`, `AWS_REGION`, `S3_BUCKET` | AWS profile (AWS Toolkit / `aws configure`); keys stay in `~/.aws` |
 | `AIRBYTE_*` | API URL, client id/secret (`abctl local credentials`), workspace, S3 keys for the destination |
 | `SNOWFLAKE_*` | account, service user `TAXI_SVC` with a key pair (`SNOWFLAKE_PRIVATE_KEY_PATH`), role, warehouse, database. `externalbrowser` is supported, but it only works on accounts with a SAML identity provider |
@@ -376,7 +396,7 @@ below, so the README always shows the latest numbers.
 
 <!-- RESULTADOS:START - generated by `make questions` from sql/q*.sql and sql/interpretations.yaml; do not edit by hand -->
 
-Assigned month **2025-01** vs **2024-01**, from the dbt marts in Snowflake (run `20261115T014908Z-93f1c0`, 2026-11-15). The queries are in [RESULTADOS.md](RESULTADOS.md). The interpretations are in Spanish and come from `sql/interpretations.yaml`.
+Assigned month **2025-01** vs **2024-01**, from the dbt marts in Snowflake (run `20261115T200213Z-27d6cc`, 2026-11-15). The queries are in [RESULTADOS.md](RESULTADOS.md). The interpretations are in Spanish and come from `sql/interpretations.yaml`.
 
 #### Q1. Top 10 pickup zones by trips in the assigned month, and their change vs the same month of the previous year.
 
@@ -486,11 +506,21 @@ raw_yellow_trips ─┴> yellow_schema_report -> curated_yellow_trips -> raw/yel
 
 - `raw/yellow_trips` and `raw/taxi_zones` share their asset keys with the dbt sources, so the lineage
   continues through `stg_*`, `fact_trips`, `dim_*` and `agg_zone_hour`. Each dbt model is an asset
-  (`dagster-dbt`).
-- Each step is one Dagster run, recorded in `DAGSTER_HOME`. `make dagster-ui` shows the runs, the
-  materialization metadata (rows read/accepted/quarantined, SHA-256, rows loaded) and the
-  reconciliation check.
-- Jobs for the UI: `monthly_pipeline` (partitioned), `reference_data` and `warehouse_models`.
+  (`dagster-dbt`). `superset_dashboards` (group `analytics`) closes the graph: it builds the six
+  dashboards on the marts.
+- `make all` materializes **every** asset in order, one Dagster run per step: zones, each month
+  (partition), zones load, dbt + questions, dashboards. The whole lineage ends up green.
+- **Run history shared by the host and the UI** (`src/dagster_instance.py`). `docker compose up -d`
+  starts a Postgres for Dagster (`127.0.0.1:5434`) and the Dagster UI container (port 3003, read
+  only). `make all` runs on the host, points `DAGSTER_HOME/dagster.yaml` at that Postgres and records
+  each run there. The UI reads the same database, so it shows the runs, the materialization metadata
+  (rows read/accepted/quarantined, SHA-256, rows loaded) and the reconciliation check as soon as they
+  finish, on any operating system. The UI container mounts the repository read only and parses dbt
+  into its own folder, so code changes need no image rebuild.
+- Without Docker, the history falls back to SQLite in `DATA_DIR/dagster_home`, and
+  `make dagster-ui` opens a local UI on it (`DAGSTER_STORAGE=auto|postgres|sqlite`).
+- Jobs: `monthly_pipeline` (partitioned), `reference_data` and `warehouse_models` (with
+  `make dagster-ui`, they can be launched from the UI).
 - Every step can also run alone (`make schema`, `make quality`...), and `make all-steps` chains
   them without Dagster.
 
@@ -498,7 +528,8 @@ raw_yellow_trips ─┴> yellow_schema_report -> curated_yellow_trips -> raw/yel
 
 ## 11. Observability
 
-`make up` starts the stack defined in `docker-compose.yml`, with every image pinned:
+`docker compose up -d` (or `make up`) starts the stack defined in `docker-compose.yml`, with every
+image pinned:
 
 - **Metrics:** each step pushes to the **Pushgateway**, and **Prometheus** scrapes it. The metrics
   are:
@@ -532,11 +563,14 @@ raw_yellow_trips ─┴> yellow_schema_report -> curated_yellow_trips -> raw/yel
 
 ## 12. Dashboards (Superset)
 
-`make superset-dashboards MES=2025-01` (`superset/bootstrap_dashboards.py`) creates the dashboards
-**as code** through the Superset API. It is idempotent: objects are matched by name and updated. It
+`make all` builds the dashboards **as code** through the Superset API, as its last Dagster asset
+(`superset_dashboards`, code in `src/dashboards.py`). It waits for Superset if the stack was just
+started, and skips with a warning when the stack is not running. `make superset-dashboards
+MES=2025-01` runs the same step alone. It is idempotent: objects are matched by name and updated. It
 creates the database connection (Snowflake marts through the service user's key pair, or the
-offline DuckDB copy), 10 virtual datasets and **6 dashboards in English**. Each one compares the
-assigned month with the same month of the previous year (series colored per period):
+offline DuckDB copy when `WAREHOUSE=duckdb`), 10 virtual datasets and **6 dashboards in English**.
+Each one compares the assigned month with the same month of the previous year (series colored per
+period):
 
 | Dashboard | Charts |
 |---|---|
@@ -554,8 +588,10 @@ assigned month with the same month of the previous year (series colored per peri
 - **Persistence.** Superset's metadata lives in a host folder, `DATA_DIR/superset_home`
   (`superset.db`), not in a Docker volume. That covers dashboards, charts, datasets and the
   connection. It survives container restarts and re-creation, `docker compose down -v`, volume
-  prunes, a Docker Desktop reset and a reboot. If it is ever lost, run
-  `make superset-dashboards MES=2025-01` to rebuild it all.
+  prunes, a Docker Desktop reset and a reboot. If it is ever lost, the next `make all` (or
+  `make superset-dashboards MES=2025-01`) rebuilds it all.
+- **Admin password.** The container applies `SUPERSET_ADMIN_PASSWORD` from `.env` on every start,
+  so changing it in `.env` and restarting the stack is enough.
 
 ---
 
@@ -605,8 +641,14 @@ user. It reports:
 
 ## 14. Tests
 
-`make test` runs 40 tests on synthetic data, with no network or cloud account needed. Besides the
+`make test` runs 52 tests on synthetic data, with no network or cloud account needed. Besides the
 groups below:
+- `tests/test_stack.py` checks the two-command run: the Dagster history goes to the Postgres of
+  docker compose when it answers and falls back to SQLite otherwise; the dbt target follows the
+  warehouse; offline mode never touches S3; the zone lookup falls back to a direct download when
+  Airbyte is not available (or fails with `AIRBYTE_FALLBACK=fail`); the offline BI copy avoids the
+  DICT_FSST text compression that Superset's DuckDB 1.3 reads back as NULL; and `make clean` keeps
+  the dashboards and the folders that docker compose mounts.
 - `tests/test_resultados.py` checks the interpretation formatting, that the README results block is
   replaced only between its markers, and that `sql/interpretations.yaml` answers every question.
 - `tests/test_config.py` checks the portable paths (`~`, relative and absolute).
@@ -672,7 +714,7 @@ Notes on the table:
 ## 16. Oral defense script
 
 ```bash
-make up && make all MES=2025-01            # 1. full pipeline (Dagster UI: make dagster-ui)
+docker compose up -d && make all MES=2025-01   # 1. full pipeline (Dagster UI: http://localhost:3003)
 make demo-idempotency MES=2025-01          # 2. run again: every count unchanged, raw skipped by hash
 make quality-report MES=2025-01            # 3. quality report
 make show-quarantine MES=2025-01           #    one quarantined row per rule, with its source row
