@@ -54,7 +54,10 @@ def json_file_handler(data_dir: Path, run_id: str) -> logging.Handler | None:
 
 
 def _gateway() -> str:
-    return os.environ.get("PUSHGATEWAY_URL", "http://localhost:9091").strip()
+    from src.config import loopback
+
+    url = os.environ.get("PUSHGATEWAY_URL", "http://localhost:9091").strip()
+    return loopback(url) if url else ""
 
 
 def push(step: str, mes: str, samples: Iterable[tuple[str, str, dict[str, str], float]], *, replace: bool = True) -> None:
