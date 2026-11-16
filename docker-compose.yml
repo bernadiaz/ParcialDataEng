@@ -8,6 +8,8 @@
 #   Pushgateway http://localhost:9091   receives the metrics of every pipeline step
 #   Loki        http://localhost:3100   log store (Grafana Alloy ships pipeline + container logs)
 #   Postgres    127.0.0.1:5434          Dagster run history, shared by `make all` and the Dagster UI
+#   pipeline    (no port)               Python 3.12 + make + requirements.txt, for computers without them:
+#                                       docker compose exec pipeline make all MES=2025-01
 # Secrets come from .env. Images are pinned to exact versions. Ports bind to 127.0.0.1 only and avoid
 # the ports of other local stacks (3000/3001/8088/8089, and 5432/5433 of a local PostgreSQL). Every
 # host port can be changed in .env (GRAFANA_PORT, SUPERSET_PORT, ...) when another program, or a range
@@ -37,6 +39,8 @@ services:
     volumes:
       - ${DATA_DIR:-./data}:/data
       - ${SNOWFLAKE_KEYS_DIR:-./data/keys}:/keys
+      # AWS profile folder that the pipeline container mounts (created empty when it does not exist)
+      - ${AWS_CONFIG_DIR:-~/.aws}:/aws
       - .:/repo:ro
     command:
       - sh
@@ -46,6 +50,7 @@ services:
         mkdir -p /data/logs /data/bi /data/superset_home /data/dagster_home/storage
         chown "$$owner" /data /data/logs /data/bi /data/dagster_home /data/dagster_home/storage /keys 2>/dev/null || true
         chown 1000:1000 /data/superset_home 2>/dev/null || true
+        [ -n "$$(ls -A /aws 2>/dev/null)" ] || chown "$$owner" /aws 2>/dev/null || true
     restart: "no"
 
   dagster-postgres:
@@ -237,6 +242,48 @@ services:
       # Snowflake key pair of the service user (SNOWFLAKE_PRIVATE_KEY_PATH lives here on the host)
       - ${SNOWFLAKE_KEYS_DIR:-./data/keys}:/app/keys:ro
     ports: ["127.0.0.1:${SUPERSET_PORT:-8090}:8088"]
+    depends_on:
+      data-dirs: {condition: service_completed_successfully}
+    restart: unless-stopped
+
+  # The pipeline itself, for computers without make or Python (only Docker): Python 3.12, GNU make and
+  # requirements.txt (Dockerfile). It idles until a run is started inside it:
+  #   docker compose exec pipeline make all MES=2025-01                                      (cloud)
+  #   docker compose exec pipeline make all MES=2025-01 INGEST_MODE=direct WAREHOUSE=duckdb  (offline)
+  # It uses the same .env, DATA_DIR, Snowflake key and AWS profile as `make all` on the host, so both
+  # ways write the same data, run history, logs, metrics and dashboards.
+  pipeline:
+    logging: *logging
+    # DuckDB takes a quarter of this limit (DUCKDB_MEMORY_LIMIT=auto). Idle, the container uses ~1 MB.
+    mem_limit: ${PIPELINE_MEM_LIMIT:-4g}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nyc-taxi-pipeline
+    # Rebuilt (from cache) on every `docker compose up -d`, so a change in requirements.txt always applies.
+    pull_policy: build
+    init: true
+    working_dir: /workspace
+    environment:
+      # Paths and addresses inside the container. docker/pipeline-make.sh runs make with -e, so these
+      # win over the host values of .env; it also translates AIRBYTE_API_URL and the Snowflake key path.
+      DATA_DIR: /data
+      SNOWFLAKE_KEYS_DIR: /keys
+      DAGSTER_PG_HOST: dagster-postgres
+      DAGSTER_PG_PORT: "5432"
+      SUPERSET_URL: http://superset:8088
+      PUSHGATEWAY_URL: http://pushgateway:9091
+      # dbt artifacts of the container stay in the container: its partial parse holds Linux paths,
+      # which dbt on a Windows host cannot read from dbt_taxi/target.
+      DBT_TARGET_PATH: /opt/dbt/target
+      DBT_LOG_PATH: /opt/dbt/logs
+    volumes:
+      - .:/workspace
+      - ${DATA_DIR:-./data}:/data
+      - ${SNOWFLAKE_KEYS_DIR:-./data/keys}:/keys:ro
+      - ${AWS_CONFIG_DIR:-~/.aws}:/home/pipeline/.aws:ro
+    # Airbyte (abctl) runs on the host, outside this stack: Linux needs this alias, Docker Desktop has it.
+    extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
       data-dirs: {condition: service_completed_successfully}
     restart: unless-stopped

@@ -7,6 +7,10 @@
 #   make all MES=2025-01 INGEST_MODE=direct WAREHOUSE=duckdb      the same, offline (no cloud account)
 #   make help                     list every target
 #
+# Without make or Python on the computer (only Docker), the same targets run in the pipeline container:
+#   docker compose exec pipeline make all MES=2025-01
+#   docker compose exec pipeline make all MES=2025-01 INGEST_MODE=direct WAREHOUSE=duckdb
+#
 # `make all` creates .venv and installs the project the first time (and again when pyproject.toml
 # changes), so `make install` is optional. Settings and credentials come from .env (see .env.example).
 # Paths in .env are portable (~ = home, relative = repo) and are resolved by src/config.py, so this
@@ -17,19 +21,23 @@ export
 
 MES ?= 2025-01
 
+# Virtual environment of the project. The pipeline container of docker compose sets VENV_DIR=/opt/venv
+# (built into its image from requirements.txt), so it never touches the .venv of the host.
+VENV_DIR ?= .venv
+
 # Python 3.12 or newer: the first interpreter of the list that qualifies (override with PYTHON=...).
 ifeq ($(OS),Windows_NT)
-  VENV_BIN := .venv/Scripts
+  VENV_BIN := $(VENV_DIR)/Scripts
   PY_CANDIDATES := "py -3.12" "py -3.13" "py -3.14" "py -3" python3 python
 else
-  VENV_BIN := .venv/bin
+  VENV_BIN := $(VENV_DIR)/bin
   PY_CANDIDATES := python3.12 python3.13 python3.14 python3
 endif
 PYTHON ?= $(shell for c in $(PY_CANDIDATES); do $$c -c 'import sys; sys.exit(sys.version_info < (3, 12))' >/dev/null 2>&1 && { echo "$$c"; break; }; done)
 unexport PYTHON PY_CANDIDATES
 PY  := $(VENV_BIN)/python
 # Written by `make install`; older than pyproject.toml (or missing) = the .venv must be (re)installed.
-VENV := .venv/.installed
+VENV := $(VENV_DIR)/.installed
 # dbt and the Dagster UI run through src/run_tool.py, which resolves the paths of .env first.
 DBT := $(PY) -m src.run_tool dbt
 
@@ -61,7 +69,7 @@ help: ## list targets
 
 install: ## create .venv and install dependencies (Python 3.12+ found automatically, or PYTHON=...)
 	@test -n "$(PYTHON)" || { echo "Python 3.12 or newer was not found. Install it (see the run guide) or pass PYTHON=..."; exit 1; }
-	$(PYTHON) -m venv --clear .venv
+	$(PYTHON) -m venv --clear $(VENV_DIR)
 	$(PY) -m pip install --upgrade pip
 	$(PY) -m pip install -e ".[dev]"
 	@$(PY) -c "open('$(VENV)', 'w').close()"
