@@ -40,9 +40,11 @@ The month is a parameter everywhere. `MES=2025-01` processes 2025-01 and 2024-01
 
 ## 1. Quick start
 
-Requirements: Python 3.12+, GNU make (on Windows run it from Git Bash), Docker (Docker Desktop on
-Windows and macOS, Docker Engine with the Compose plugin on Linux). The cloud mode also needs an AWS
-account with an S3 bucket, a Snowflake account and Airbyte (`abctl`).
+Requirements: Docker (Docker Desktop on Windows and macOS, Docker Engine with the Compose plugin on
+Linux), plus Python 3.12+ and GNU make (on Windows run it from Git Bash). Without Python and make,
+the `pipeline` container runs the same commands (see [Only Docker](#only-docker-no-make-or-python)
+below). The cloud mode also needs an AWS account with an S3 bucket, a Snowflake account and Airbyte
+(`abctl`).
 
 ```bash
 git clone https://github.com/bernadiaz/ParcialDataEng.git && cd ParcialDataEng
@@ -72,6 +74,41 @@ In cloud mode, if Airbyte is stopped (for example after a reboot), the pipeline 
 container and waits for it. If Airbyte still does not answer, the zone lookup is downloaded from the
 TLC and uploaded unmodified to the same S3 prefix (`AIRBYTE_FALLBACK=direct`, logged as
 `mode=direct`).
+
+### Only Docker (no make or Python)
+
+`docker compose up -d` also starts the `pipeline` container, built from the [`Dockerfile`](Dockerfile):
+Python 3.12, GNU make, git, curl, openssl and every library of [`requirements.txt`](requirements.txt),
+at the versions the pipeline was validated with. Run the same `make` targets inside it, on Windows
+(PowerShell, CMD or Git Bash), Linux or macOS:
+
+```bash
+git clone https://github.com/bernadiaz/ParcialDataEng.git && cd ParcialDataEng
+cp .env.example .env              # fill in the values (section 4)
+docker compose up -d
+docker compose exec pipeline make all MES=2025-01                                        # cloud
+docker compose exec pipeline make all MES=2025-01 INGEST_MODE=direct WAREHOUSE=duckdb    # offline
+```
+
+Both ways share everything: the same `.env`, `DATA_DIR`, Snowflake key and AWS profile, so they write
+the same data, Dagster run history, logs, metrics and dashboards. Inside the container,
+[`docker/pipeline-make.sh`](docker/pipeline-make.sh) runs `make` with these adjustments:
+- `DATA_DIR` is mounted at `/data`. Postgres, Superset and the Pushgateway are reached by their
+  service names, and Airbyte (abctl, on the host) through `host.docker.internal`.
+- The Snowflake key is read from `SNOWFLAKE_KEYS_DIR` (mounted at `/keys`), so keep the key file in
+  that folder. make uses a private copy of it (permissions 0600): Docker Desktop shows files mounted
+  from Windows as writable by everyone, and the Snowflake connector refuses such a key. The AWS
+  profile comes from `~/.aws` (`AWS_CONFIG_DIR` in `.env` changes it).
+- On Linux, make runs as the owner of the repository, so no file ends up owned by root.
+- The libraries live in the image (`/opt/venv`), never in the repository's `.venv`.
+  `docker compose up -d` rebuilds the image when `requirements.txt` changes.
+- dbt writes its artifacts to `/opt/dbt` in the container, not to `dbt_taxi/target`: a partial parse
+  written on Linux holds Linux paths, and dbt on a Windows host fails to read it.
+
+Two differences with the host: the container cannot start a stopped Airbyte (start it with
+`docker start airbyte-abctl-control-plane`, or the zone lookup takes the direct path), and DuckDB gets
+a quarter of the container's memory limit (`PIPELINE_MEM_LIMIT`, 4g by default). `make status` and
+`make up` check the host, so run them on the host or use `docker compose ps`.
 
 | UI | URL | What |
 |---|---|---|
@@ -154,9 +191,12 @@ snowflake/          setup.sql (warehouses, monitor, schemas, tags, role) + finop
 observability/      prometheus.yml, alloy/config.alloy, grafana provisioning + dashboards
 superset/           Dockerfile, config, first-start script
 dagster/            Dockerfile + supervisor of the Dagster UI container (reloads it when the code changes)
+docker/             pipeline-make.sh: `make` of the pipeline container (adapts .env to the container)
+Dockerfile          pipeline container: Python 3.12, GNU make and requirements.txt (runs make without installing it)
+requirements.txt    every library of the pipeline, pinned to the validated versions (pip install -r requirements.txt)
 tests/              pytest: quality rules, idempotency, reconciliation, schema, two-command run
 docs/               Spanish project documentation (Documentacion_Pipeline_NYC_Taxi.docx)
-docker-compose.yml  Dagster UI + its Postgres, observability and BI stack
+docker-compose.yml  Dagster UI + its Postgres, observability and BI stack, and the pipeline container
 Makefile            the only command you need
 ```
 
@@ -841,16 +881,26 @@ Then show:
 
 ## 18. AI usage statement
 
-AI assistants were used during this project and every line was reviewed by the author:
+We used AI assistants in this project, and we want to be clear about how:
 
-- **Claude Code (Anthropic):** generated most of the implementation in this repository from the
-  project plan and the exam statement. That includes the Python modules, the dbt project, the SQL
-  questions, the tests, the Docker/observability configuration, the Superset dashboards-as-code and
-  this README. It also profiled the January files to propose the thresholds.
-- **Cursor:** used for the project plan (`Plan_Pipeline_NYC_Taxi`).
+- **Claude Code (Anthropic)** generated most of the code in this repository from our project plan
+  and the exam statement: the Python modules, the dbt project, the SQL questions, the tests, the
+  Docker and observability setup, the Superset dashboards-as-code and this README. It also profiled
+  the January files to propose the quality thresholds.
+- **Cursor** helped us write the project plan (`Plan_Pipeline_NYC_Taxi`).
 
-At the author's request, Claude Code also drafted the interpretations and conclusions in
-`sql/interpretations.yaml` (shown in RESULTADOS.md and in the results section of this README). It
-based them on the measured results and on control queries over `marts.fact_trips`. The quality rule
-severities, the thresholds and the interpretations are the author's responsibility. The author
-reviews them and defends them in the oral exam.
+That does not mean Claude built the project on its own while we watched. The plan and the main
+decisions were ours: Airbyte -> S3 -> DuckDB -> Snowflake + dbt, Dagster for orchestration, the
+observability stack and the dashboards in English. We ran every change on our own laptops and
+accounts (AWS, Snowflake, Airbyte), and that is where most problems showed up: Airbyte jobs stuck in
+"pending", out-of-memory errors with the monthly Parquet files, a connector that could not serialize
+timestamps, Superset charts failing on Snowflake's uppercase columns, empty Grafana panels, a UI that
+would not open on a second laptop, and very slow `localhost` connections on Windows. We brought each
+one to Claude, found the cause together, tested the fix on our machines and only then committed and
+pushed it. The commit history shows that back-and-forth.
+
+At our request, Claude also drafted the interpretations and conclusions in
+`sql/interpretations.yaml` (shown in RESULTADOS.md and in the results section of this README), based
+on the measured results and on control queries over `marts.fact_trips`. We reviewed them. The
+quality rule severities, the thresholds and the interpretations are our responsibility, and we
+defend them in the oral exam.
