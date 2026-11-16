@@ -362,24 +362,43 @@ class AirbyteClient:
     def update_destination(self, destination_id: str, configuration: dict[str, Any]) -> None:
         self.request("PATCH", f"/destinations/{destination_id}", {"configuration": configuration})
 
-    def wait_for_running_jobs(self, connection_id: str, *, poll_seconds: float = 15, timeout_seconds: float = 3600,
+    def running_jobs(self, connection_id: str) -> list[dict[str, Any]]:
+        return [j for j in self.request("GET", f"/jobs?connectionId={connection_id}&limit=20").get("data", [])
+                if j.get("status") in self.BUSY]
+
+    def cancel_job(self, job_id: Any) -> None:
+        self.request("DELETE", f"/jobs/{job_id}")
+        log.warning("Airbyte job %s cancelled", job_id)
+
+    def wait_for_running_jobs(self, connection_id: str, *, poll_seconds: float = 15, timeout_seconds: float | None = None,
                               sleep: Callable[[float], None] = time.sleep) -> None:
         """Airbyte refuses a second job on a busy connection (HTTP 409), e.g. when it retries an
-        interrupted job by itself after a restart. Wait until the connection is idle."""
+        interrupted job by itself after a restart, or when a sync was started by hand in the UI.
+        Waits until the connection is idle. A job still running after AIRBYTE_SYNC_TIMEOUT_MINUTES is
+        stuck (for example the yellow File source, which can stay in "Syncing" for hours on a laptop):
+        it is cancelled."""
+        timeout_seconds = sync_timeout_seconds() if timeout_seconds is None else timeout_seconds
         waited = 0.0
         while True:
-            running = [j for j in self.request("GET", f"/jobs?connectionId={connection_id}&limit=20").get("data", [])
-                       if j.get("status") in self.BUSY]
+            running = self.running_jobs(connection_id)
             if not running:
                 return
             if waited >= timeout_seconds:
-                raise RetryableError(f"connection {connection_id} still busy with job(s) {[j['jobId'] for j in running]}")
+                for j in running:
+                    self.cancel_job(j["jobId"])
+                return
             log.info("Airbyte connection busy with job(s) %s, waiting", [j["jobId"] for j in running])
             sleep(poll_seconds)
             waited += poll_seconds
 
-    def run_sync(self, connection_id: str, *, poll_seconds: float = 10, timeout_seconds: float = 3600,
+    def run_sync(self, connection_id: str, *, poll_seconds: float = 10, timeout_seconds: float | None = None,
                  sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+        """Runs one sync job and waits for it, at most AIRBYTE_SYNC_TIMEOUT_MINUTES (30 by default).
+
+        A job that does not finish in time is cancelled, so it never stays in "Syncing" holding memory.
+        A failed or cancelled job raises IngestionError without starting another one: Airbyte already
+        retried its attempts, and the ingestion falls back to the direct path (AIRBYTE_FALLBACK)."""
+        timeout_seconds = sync_timeout_seconds() if timeout_seconds is None else timeout_seconds
         self.wait_for_running_jobs(connection_id, sleep=sleep, timeout_seconds=timeout_seconds)
         job = self.request("POST", "/jobs", {"connectionId": connection_id, "jobType": "sync"})
         job_id = job["jobId"]
@@ -387,13 +406,18 @@ class AirbyteClient:
         waited = 0.0
         while job.get("status") not in self.TERMINAL:
             if waited >= timeout_seconds:
-                raise RetryableError(f"Airbyte job {job_id} still {job.get('status')} after {timeout_seconds:.0f}s")
+                self.cancel_job(job_id)
+                raise IngestionError(f"Airbyte job {job_id} was still {job.get('status')} after "
+                                     f"{timeout_seconds / 60:.0f} min: cancelled (AIRBYTE_SYNC_TIMEOUT_MINUTES)")
             sleep(poll_seconds)
             waited += poll_seconds
             job = self.request("GET", f"/jobs/{job_id}")
         if job["status"] != "succeeded":
-            raise RetryableError(f"Airbyte job {job_id} ended {job['status']}")
+            raise IngestionError(f"Airbyte job {job_id} ended {job['status']} (its attempts and logs are in the Airbyte UI)")
         return job
+
+    def delete(self, kind: str, object_id: str) -> None:
+        self.request("DELETE", f"/{kind}/{object_id}")
 
 
 # Creating a connection makes Airbyte discover the source schema, and the File source downloads
@@ -406,6 +430,12 @@ DISCOVERY_POLL_SECONDS = 30
 
 
 ABCTL_CONTAINER = "airbyte-abctl-control-plane"
+
+
+def sync_timeout_seconds() -> float:
+    """AIRBYTE_SYNC_TIMEOUT_MINUTES (default 30): the zone lookup syncs in about 3 minutes, and the
+    first run of a new install also pulls the connector images."""
+    return float(os.environ.get("AIRBYTE_SYNC_TIMEOUT_MINUTES", "").strip() or "30") * 60
 
 
 def available_memory_mb() -> int:
@@ -452,8 +482,19 @@ def _save_ids(ids: dict[str, dict[str, str]]) -> None:
     STATE_FILE.write_text(json.dumps(ids, indent=2), encoding="utf-8")
 
 
-def setup_airbyte(client: AirbyteClient, month: Month, sleep: Callable[[float], None] = time.sleep) -> dict[str, dict[str, str]]:
-    """Makes sure the source, destination and manual connection of each dataset exist.
+def airbyte_datasets(ingest_mode: str) -> list[str]:
+    """Datasets that go through Airbyte: only the zone lookup in hybrid mode, both in airbyte mode.
+
+    The yellow connection is not created in hybrid mode. Airbyte's File source loads the whole
+    monthly Parquet into pandas, even to discover its schema, and then cannot serialize its
+    timestamps, so that connection would only sit in "Syncing" and fail (airbyte/README_AIRBYTE.md)."""
+    return ["zones", "yellow"] if ingest_mode == "airbyte" else ["zones"] if ingest_mode == "hybrid" else []
+
+
+def setup_airbyte(client: AirbyteClient, month: Month, sleep: Callable[[float], None] = time.sleep,
+                  datasets: list[str] | None = None) -> dict[str, dict[str, str]]:
+    """Makes sure the source, destination and manual connection of each dataset exist (all of them,
+    or only `datasets`).
 
     Idempotent and automatic. An object that already exists with the versioned name is reused,
     never duplicated, and every id is saved as soon as it is known, so an interrupted setup simply
@@ -495,7 +536,7 @@ def setup_airbyte(client: AirbyteClient, month: Month, sleep: Callable[[float], 
         log.info("Airbyte %s %s ready: %s", kind[:-1], name, current[field])
         return current[field]
 
-    for dataset in CONNECTION_FILES:
+    for dataset in (datasets if datasets is not None else list(CONNECTION_FILES)):
         spec = load_connection(dataset)
         source_id = ensure(dataset, "source_id", "sources", spec["source"]["name"], {
             "name": spec["source"]["name"], "workspaceId": workspace,
@@ -605,7 +646,18 @@ class Ingestor:
             return
         try:
             if self.mode_for(dataset) == "airbyte" and self._airbyte_ready():
-                self._via_airbyte(dataset, month, mes, url, prefix, mirror_dir)
+                try:
+                    self._via_airbyte(dataset, month, mes, url, prefix, mirror_dir)
+                except IngestionError as exc:
+                    if os.environ.get("AIRBYTE_FALLBACK", "direct").strip().lower() == "fail":
+                        raise
+                    # The failed sync stays in ingestion_log (mode=airbyte, status=error); the file is
+                    # then landed the direct way, unmodified, at the same S3 prefix.
+                    self.log.append(dataset=dataset, mes=mes, url=url, mode="airbyte", action="failed",
+                                    attempts=exc.attempts, status="error", error=str(exc))
+                    log.warning("%s %s: Airbyte sync failed (%s): downloading straight from the TLC to the same S3 "
+                                "prefix instead (AIRBYTE_FALLBACK=direct)", dataset, mes, exc)
+                    self._direct(dataset, mes, url, prefix, mirror_dir, file_name)
             else:
                 self._direct(dataset, mes, url, prefix, mirror_dir, file_name)
         except IngestionError as exc:
@@ -649,7 +701,7 @@ class Ingestor:
         ids = load_ids().get(dataset, {})
         if any(not ids.get(k) for k in ("source_id", "destination_id", "connection_id")):
             log.info("Airbyte objects for %s not set up yet: creating them automatically", dataset)
-            ids = setup_airbyte(self.airbyte, month or Month(2025, 1), sleep=self.sleep).get(dataset, {})
+            ids = setup_airbyte(self.airbyte, month or Month(2025, 1), sleep=self.sleep, datasets=[dataset]).get(dataset, {})
         started = datetime.now(timezone.utc)
 
         def sync() -> dict[str, Any]:
@@ -730,18 +782,83 @@ class Ingestor:
         log.info("%s %s: downloaded %s bytes, sha256=%s..., %s rows", dataset, mes, f"{size:,}", digest[:12], f"{entry['row_count']:,}")
 
 
+def _project_connections(client: AirbyteClient) -> dict[str, dict[str, str]]:
+    """Ids of this project's Airbyte objects: airbyte/state/ids.json, else looked up by their versioned name."""
+    workspace = os.environ.get("AIRBYTE_WORKSPACE_ID", "").strip()
+    ids = load_ids()
+    found: dict[str, dict[str, str]] = {}
+    for dataset in CONNECTION_FILES:
+        spec = load_connection(dataset)
+        current = dict(ids.get(dataset, {}))
+        for field, kind, name in (("connection_id", "connections", spec["connection"]["name"]),
+                                  ("source_id", "sources", spec["source"]["name"]),
+                                  ("destination_id", "destinations", spec["destination"]["name"])):
+            if not current.get(field) and workspace:
+                current[field] = client.find(kind, name, workspace) or ""
+        found[dataset] = current
+    return found
+
+
+def cancel_running(client: AirbyteClient) -> list[Any]:
+    """Cancels every running or pending sync of this project's connections (make airbyte-cancel)."""
+    cancelled = []
+    for dataset, ids in _project_connections(client).items():
+        if not ids.get("connection_id"):
+            continue
+        for job in client.running_jobs(ids["connection_id"]):
+            client.cancel_job(job["jobId"])
+            cancelled.append(job["jobId"])
+            log.info("%s: cancelled Airbyte job %s (%s)", dataset, job["jobId"], job.get("status"))
+    if not cancelled:
+        log.info("No Airbyte sync of this project is running")
+    return cancelled
+
+
+def prune_unused(client: AirbyteClient, ingest_mode: str) -> list[str]:
+    """Deletes the Airbyte objects of the datasets that INGEST_MODE does not sync through Airbyte
+    (in hybrid mode: the yellow monthly connection, its source and its destination), cancelling their
+    jobs first. They are created again by themselves if INGEST_MODE=airbyte is used later."""
+    used = set(airbyte_datasets(ingest_mode))
+    ids_file = load_ids()
+    removed = []
+    for dataset, ids in _project_connections(client).items():
+        if dataset in used:
+            continue
+        if ids.get("connection_id"):
+            for job in client.running_jobs(ids["connection_id"]):
+                client.cancel_job(job["jobId"])
+        for field, kind in (("connection_id", "connections"), ("source_id", "sources"), ("destination_id", "destinations")):
+            if ids.get(field):
+                client.delete(kind, ids[field])
+                removed.append(f"{kind[:-1]} {ids[field]}")
+                log.info("%s: deleted unused Airbyte %s %s", dataset, kind[:-1], ids[field])
+        ids_file.pop(dataset, None)
+    _save_ids(ids_file)
+    if not removed:
+        log.info("No unused Airbyte objects for INGEST_MODE=%s", ingest_mode)
+    return removed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mes", action="append", default=[], help="YYYY-MM (repeatable)")
-    parser.add_argument("--setup", action="store_true", help="create the Airbyte source/destination/connections")
+    parser.add_argument("--setup", action="store_true", help="create the Airbyte objects this INGEST_MODE uses")
+    parser.add_argument("--cancel", action="store_true", help="cancel running syncs of this project")
+    parser.add_argument("--prune", action="store_true", help="delete Airbyte objects this INGEST_MODE does not use")
     args = parser.parse_args(argv)
     settings = Settings.from_env()
     try:
         months = [Month.parse(m) for m in args.mes]
-        if args.setup:
+        if args.setup or args.cancel or args.prune:
             client = AirbyteClient(os.environ.get("AIRBYTE_API_URL", ""), os.environ.get("AIRBYTE_CLIENT_ID", ""),
                                    os.environ.get("AIRBYTE_CLIENT_SECRET", ""))
-            setup_airbyte(client, months[0] if months else Month(2025, 1))
+            if args.cancel:
+                cancel_running(client)
+            if args.prune:
+                prune_unused(client, settings.ingest_mode)
+            if args.setup:
+                setup_airbyte(client, months[0] if months else Month(2025, 1),
+                              datasets=airbyte_datasets(settings.ingest_mode) or ["zones"])
             return 0
         if not months:
             parser.error("--mes is required")

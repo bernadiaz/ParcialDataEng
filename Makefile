@@ -52,7 +52,7 @@ export DBT_MONTHS = $(subst $(space),$(comma),$(strip $(MONTHS)))
 DBT_ARGS = --project-dir dbt_taxi --profiles-dir dbt_taxi
 
 .DEFAULT_GOAL := help
-.PHONY: help install all all-steps dagster-ui up down status superset-dashboards airbyte-setup airbyte-sync schema \
+.PHONY: help install all all-steps dagster-ui up down status superset-dashboards airbyte-setup airbyte-cancel airbyte-prune airbyte-sync schema \
         quality load-sf dbt-run dbt-docs questions test explore demo-idempotency show-quarantine quality-report \
         finops clean
 
@@ -94,6 +94,12 @@ superset-dashboards: $(VENV) ## create/update the Superset dashboards alone (mak
 
 airbyte-setup: ## optional: create the Airbyte objects ahead of time (ingestion creates them automatically)
 	$(PY) -m src.ingesta_airbyte --setup --mes $(MES)
+
+airbyte-cancel: $(VENV) ## cancel Airbyte syncs of this project that are stuck in "Syncing"
+	$(PY) -m src.ingesta_airbyte --cancel
+
+airbyte-prune: $(VENV) ## cancel and delete Airbyte objects this INGEST_MODE does not use (hybrid: the yellow monthly connection)
+	$(PY) -m src.ingesta_airbyte --prune
 
 airbyte-sync: ## land the TLC files in S3 with Airbyte, verify SHA-256, write ingestion_log
 	$(PY) -m src.ingesta_airbyte $(MES_ARGS)
