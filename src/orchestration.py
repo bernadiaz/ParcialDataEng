@@ -328,6 +328,13 @@ def _print_stack_status() -> None:
     try:
         statuses = stack_status.check_all()
     except Exception:  # noqa: BLE001 - Docker not installed or not running: the pipeline itself succeeded
+        if Path("/.dockerenv").exists():
+            # The pipeline container of docker compose has no docker CLI, and the stack is up by definition.
+            print("Open the UIs in your browser (`docker compose ps` on the host shows the containers):")
+            for service in stack_status.SERVICES:
+                if service.name in {"dagster", "grafana", "superset", "prometheus", "dozzle"}:
+                    print(f"  {service.title:11s} {service.url}")
+            return
         print("Docker stack not running: start it with `docker compose up -d` to see Dagster, Grafana and Superset.")
         return
     for status in statuses:
