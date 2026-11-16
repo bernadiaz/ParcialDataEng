@@ -44,7 +44,9 @@ The S3 destination cannot read an AWS profile, so it needs access keys. The pipe
 
 `make all` (or `make airbyte-sync`) creates whatever Airbyte objects are missing the first time
 they are needed: a source, an S3 destination and a manual connection (full refresh, overwrite)
-for each dataset. The setup is **idempotent**:
+for each dataset that goes through Airbyte. With `INGEST_MODE=hybrid` that is only the zone lookup
+(`nyc-taxi-zones`); `nyc-taxi-yellow-monthly` is created only with `INGEST_MODE=airbyte` (see
+"The yellow monthly connection stays in Syncing" below). The setup is **idempotent**:
 
 - An object that already exists with the versioned name is reused, never duplicated.
 - Every id is saved to `airbyte/state/ids.json` (gitignored) as soon as it is known, so an
@@ -65,8 +67,15 @@ For each dataset and month (the month and the same month of the previous year):
    logged. A month ingested earlier without S3 (offline mode) is synced again.
 2. **Parametrize.** The source URL (`yellow_tripdata_{mes}.parquet`) and the destination path
    (`year={year}/month={month}`) of the versioned YAML are sent to the API.
-3. **Sync with retries.** If the job fails, the wrapper retries 3 times, waiting 1 s, 2 s and 4 s.
-   If it still fails, it logs `status=error` and exits with code 1.
+3. **Sync, time-boxed.** Errors reaching the Airbyte API (network, timeouts, 5xx) are retried 3
+   times, waiting 1 s, 2 s and 4 s. A job that fails is not started again, because Airbyte has already
+   retried its own attempts. A job still running after `AIRBYTE_SYNC_TIMEOUT_MINUTES` (30) is
+   cancelled, so it never stays in "Syncing" holding memory. In both cases the failure is logged
+   (`mode=airbyte`, `status=error`), and with `AIRBYTE_FALLBACK=direct` (default) the same file is
+   downloaded from the TLC CDN and uploaded unmodified to the same S3 prefix. With
+   `AIRBYTE_FALLBACK=fail` the run stops with exit code 1. Before starting, a job of the same
+   connection that is still running (for example one started by hand in the UI) is awaited and, if
+   it outlives the timeout, cancelled.
 4. **Verify.** Objects older than this sync under the month prefix are removed (overwrite safety
    net). Each landed object is downloaded to `DATA_DIR/raw/...` computing SHA-256, its Parquet row
    count is compared with the job's `rowsSynced`, and a row is logged with file, URL, bytes,
@@ -93,6 +102,37 @@ So `INGEST_MODE=hybrid` is the working configuration:
   `ingestion_log`, idempotency and retries.
 
 `INGEST_MODE=airbyte` stays available for a future connector version.
+
+## The yellow monthly connection stays in "Syncing"
+
+Symptom: in the Airbyte UI (http://localhost:8000 by default), `nyc-taxi-yellow-monthly`
+(`tlc-yellow-tripdata` -> `s3-raw-yellow`) stays in **Syncing** with 0 records for a long time.
+
+Cause, reproduced on 2026-11-15 with `airbyte/source-file:0.6.0` (the latest File source, 0.6.2,
+changes nothing here). For Parquet the File source runs `pd.read_parquet(engine="fastparquet")` on
+the **whole** file and then `df.to_dict(orient="records")`: millions of Python dicts in memory before
+the first record leaves, which is why nothing moves for minutes. The datetime columns then arrive as
+pandas `Timestamp`, which the message serializer cannot handle. Each attempt spent about 6 minutes
+at 0 rows and failed with `Object of type Timestamp is not JSON serializable`, and Airbyte retries
+3 attempts, so the job "syncs" for 20 minutes or more. On an 8 GB laptop with
+`--low-resource-mode` it is slower still. No setting fixes it: `reader_options` reaches pandas, but
+neither the full in-memory load nor the Timestamp values change. The TLC's public S3 bucket
+(`nyc-tlc`) answers 403, so Airbyte's S3 source cannot read the files either. Only the CloudFront
+CDN serves them.
+
+What to do:
+- `make airbyte-cancel` cancels the stuck sync (or press *Cancel* in the UI).
+- `make airbyte-prune` deletes the objects that `INGEST_MODE` does not use. In hybrid mode that is
+  the yellow connection, its source and its destination, so nobody starts it by mistake. They are
+  created again by themselves if `INGEST_MODE=airbyte` is used later.
+- The pipeline is not affected. In hybrid mode the monthly files are streamed straight from the TLC
+  to `raw/yellow/year=/month=/` (constant memory, original file, same SHA-256 and `ingestion_log`).
+  In airbyte mode a stuck or failed sync is cancelled after `AIRBYTE_SYNC_TIMEOUT_MINUTES` and the
+  file takes the direct path.
+
+Before this fix, the setup created the yellow connection in hybrid mode too. Its schema discovery
+also loads the whole month into pandas, which is how the connection appeared on a new computer
+although the pipeline never syncs it.
 
 ## Memory settings for `INGEST_MODE=airbyte`
 
