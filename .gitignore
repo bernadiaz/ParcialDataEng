@@ -6,6 +6,8 @@
 *.pem
 *.key
 .snowflake/
+# Claude Code: personal permissions (approved commands may contain secrets)
+.claude/settings.local.json
 
 # Data and generated artifacts
 data/
