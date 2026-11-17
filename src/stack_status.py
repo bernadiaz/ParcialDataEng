@@ -6,7 +6,8 @@ and its page on the published port. When something fails it says why and how to 
     `netsh interface ipv4 show excludedportrange protocol=tcp`): the container is created but never
     starts, and the browser says "This site can't be reached". Set another port in .env
     (GRAFANA_PORT=3012, ...) and run `docker compose up -d` again;
-  - the container stopped or keeps restarting: its last log lines are printed.
+  - the container stopped, or keeps restarting before its page answers (it would otherwise look
+    "starting" forever): its last log lines are printed.
 
     python -m src.stack_status            # one check
     python -m src.stack_status --wait 300 # wait up to 300 s for every UI (make up)
@@ -148,6 +149,11 @@ def check(service: Service, container: dict | None) -> Status:
         note = f" (restarted {restarts} times)" if restarts else ""
         return Status(service, True, (health or "running") + note)
     if health == "starting" or (time.time() - _started_epoch(state) < 120):
+        if restarts >= 2:
+            # Not slow: it fails before its page answers and Docker starts it again, so it looks "starting" forever.
+            return Status(service, False, f"keeps restarting ({restarts} restarts)", _logs(container["Name"].lstrip("/")),
+                          "it stops before its page answers; its last log lines above say why. Fix that, then "
+                          "`docker compose up -d`")
         return Status(service, False, "starting", "", "it is still starting (Superset needs 1-2 minutes the first time)")
     return Status(service, False, f"running, page not answering{f', {health}' if health else ''}",
                   _logs(container["Name"].lstrip("/")),
