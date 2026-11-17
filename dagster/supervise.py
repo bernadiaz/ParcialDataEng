@@ -6,6 +6,13 @@
 3. Watches the mounted repository (Python, dbt, contracts). The UI loads the code once, at start, so
    after a `git pull` or an edit it would keep showing the old lineage: when a file changes, the
    webserver restarts (about 15 s) and shows the new definitions.
+
+The webserver runs from DAGSTER_HOME, not from the repository. dagster-webserver (and the code server
+it starts) loads the .env of its working directory and lets it override the environment. The .env of
+the repository holds the values of the host (DAGSTER_PG_PORT=5434 or 5436, DATA_DIR=~/...), so the UI
+looked for its Postgres at dagster-postgres:5434, gave up after about 30 s and the container restarted
+forever ("starting" in make status). From DAGSTER_HOME, which has no .env, the settings of
+docker-compose.yml always win. src/config.py still reads the rest of the .env without overriding them.
 """
 import hashlib
 import os
@@ -54,9 +61,12 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    # A folder without .env (see the docstring): the code is still loaded from ROOT through -d.
+    workdir = Path(os.environ.get("DAGSTER_HOME") or "/opt/dagster/home")
+    workdir.mkdir(parents=True, exist_ok=True)
     while True:
         seen = fingerprint()
-        proc = current["webserver"] = subprocess.Popen(WEBSERVER)
+        proc = current["webserver"] = subprocess.Popen(WEBSERVER, cwd=workdir)
         while proc.poll() is None:
             time.sleep(POLL_SECONDS)
             if fingerprint() != seen:
