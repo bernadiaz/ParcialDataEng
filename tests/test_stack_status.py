@@ -1,6 +1,8 @@
 """make status: a UI that does not answer is explained (port taken or reserved, stopped, out of memory)."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from src import stack_status
 from src.dashboards import superset_url
 
@@ -35,6 +37,25 @@ def test_out_of_memory_and_healthy_containers(monkeypatch):
     assert "memory" in stack_status.check(GRAFANA, _container(False, oom=True)).state
     monkeypatch.setattr(stack_status, "_answers", lambda service: True)
     assert stack_status.check(GRAFANA, _container(True, health="healthy")).ok
+
+
+def test_restart_loop_is_not_reported_as_starting(monkeypatch):
+    monkeypatch.setattr(stack_status, "_answers", lambda service: False)
+    monkeypatch.setattr(stack_status, "_logs", lambda name, lines=12: "      too many retries for DB connection")
+    starting = _container(True, health="starting")
+    assert stack_status.check(GRAFANA, starting).state == "starting"
+    looping = {**starting, "RestartCount": 5}
+    status = stack_status.check(GRAFANA, looping)
+    assert not status.ok and status.state == "keeps restarting (5 restarts)"
+    assert "too many retries" in status.detail and "log lines" in status.hint
+
+
+def test_dagster_ui_ignores_the_env_file_of_the_repository():
+    # dagster-webserver lets the .env of its working directory override the environment: the host's
+    # DAGSTER_PG_PORT would replace the 5432 of docker compose and the UI would never start.
+    source = (Path(__file__).resolve().parents[1] / "dagster" / "supervise.py").read_text(encoding="utf-8")
+    assert "subprocess.Popen(WEBSERVER, cwd=workdir)" in source
+    assert 'os.environ.get("DAGSTER_HOME")' in source
 
 
 def test_ports_come_from_env(monkeypatch):
