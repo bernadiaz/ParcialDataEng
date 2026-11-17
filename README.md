@@ -129,8 +129,19 @@ page, and says why one fails and how to fix it:
   `.env` (`GRAFANA_PORT`, `SUPERSET_PORT`, `DAGSTER_UI_PORT`, `PROMETHEUS_PORT`,
   `PUSHGATEWAY_PORT`, `LOKI_PORT`, `ALLOY_PORT`, `DOZZLE_PORT`); then run `docker compose up -d`
   again;
-- the container stopped, keeps restarting or ran out of memory: its last log lines are shown;
+- the container stopped or ran out of memory: its last log lines are shown;
+- the container keeps restarting before its page answers: it is reported as "keeps restarting", with
+  its last log lines, instead of "starting" forever;
 - it is still starting (Superset needs 1-2 minutes the first time).
+
+**If Dagster stays "starting" after `make all`** (it happened on a second Windows laptop), update the
+repository (`git pull`) and run `docker compose up -d`. The cause was a restart loop in the Dagster UI
+container. `dagster-webserver` reads the `.env` of its working directory, and its values replace the
+settings of the container. So the `DAGSTER_PG_PORT` of the host (5434 by default, or 5436 on that
+laptop) replaced the 5432 of the container. The UI looked for its Postgres on the wrong port, gave up
+after about 30 seconds, and Docker started it again. The pipeline itself was fine: the runs were
+saved, and the UI was the only thing down. The UI now runs from `DAGSTER_HOME`, which has no `.env`,
+so the settings of `docker-compose.yml` always win.
 
 `make up` runs `docker compose up -d --build` and then waits until every UI answers, or prints the
 same diagnosis. No service waits for another to start (only Dagster waits for its Postgres). A
@@ -600,7 +611,11 @@ raw_yellow_trips ─┴> yellow_schema_report -> curated_yellow_trips ─┬> ra
   each run there. The UI reads the same database, so it shows the runs, the materialization metadata
   (rows read/accepted/quarantined, SHA-256, rows loaded) and the reconciliation check as soon as they
   finish, on any operating system. The UI container mounts the repository read only and parses dbt
-  into its own folder, so code changes need no image rebuild.
+  into its own folder, so code changes need no image rebuild. The webserver runs from
+  `DAGSTER_HOME`, not from the repository, because `dagster-webserver` lets the `.env` of its
+  working directory override the environment: the host's `DAGSTER_PG_PORT` would replace the
+  container's 5432. The container's settings (`docker-compose.yml`) always win; the rest of `.env` is
+  still read by `src/config.py`.
 - Without Docker, the history falls back to SQLite in `DATA_DIR/dagster_home`, and
   `make dagster-ui` opens a local UI on it (`DAGSTER_STORAGE=auto|postgres|sqlite`).
 - Jobs: `monthly_pipeline` (partitioned), `reference_data` and `warehouse_models` (with
@@ -751,7 +766,8 @@ groups below:
   airbyte-prune` deletes only the objects the mode does not use.
 - `tests/test_stack_status.py` checks that `make status` explains a UI that does not answer: port taken
   by another program or reserved by Windows (with the `.env` variable to change), container out of
-  memory, and ports read from `.env`.
+  memory, a container that keeps restarting (shown with its logs, not as "starting"), and ports read
+  from `.env`. It also checks that the Dagster UI never reads the `.env` of the repository.
 - `tests/test_cuarentena.py` checks the quarantine: rejected rows keep their original values, source
   file, row number and violated rules (and the per-rule counts); reloading `raw.yellow_quarantine`
   replaces the month instead of appending; and the quarantine file is copied to S3 only in cloud
@@ -895,7 +911,8 @@ observability stack and the dashboards in English. We ran every change on our ow
 accounts (AWS, Snowflake, Airbyte), and that is where most problems showed up: Airbyte jobs stuck in
 "pending", out-of-memory errors with the monthly Parquet files, a connector that could not serialize
 timestamps, Superset charts failing on Snowflake's uppercase columns, empty Grafana panels, a UI that
-would not open on a second laptop, and very slow `localhost` connections on Windows. We brought each
+would not open on a second laptop, a Dagster UI stuck in "starting" on another Windows laptop, and very
+slow `localhost` connections on Windows. We brought each
 one to Claude, found the cause together, tested the fix on our machines and only then committed and
 pushed it. The commit history shows that back-and-forth.
 
