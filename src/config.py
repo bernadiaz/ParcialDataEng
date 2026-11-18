@@ -180,9 +180,26 @@ class Month:
         return self.label
 
 
+# The TLC publishes yellow trip records as Parquet from January 2009 on (the older years were
+# converted when the TLC moved to Parquet in 2022). A month is compared with the same month of the
+# previous year, so the first assigned month that can be compared is January 2010.
+FIRST_TLC_MONTH = Month(2009, 1)
+
+
 def months_for(mes: str) -> list[Month]:
-    """Assigned month plus its comparison month, in that order."""
+    """Assigned month plus its comparison month, in that order.
+
+    Raises ValueError when the comparison month is older than the first TLC Parquet file or the
+    assigned month has not started yet (a month that has started may still be unpublished: the
+    ingestion step explains that case)."""
     month = Month.parse(mes)
+    if month.comparison < FIRST_TLC_MONTH:
+        raise ValueError(
+            f"MES={month} would be compared with {month.comparison}, but the TLC Parquet files start in "
+            f"{FIRST_TLC_MONTH}: use MES={Month(FIRST_TLC_MONTH.year + 1, 1)} or later")
+    today = datetime.now(timezone.utc)
+    if (month.year, month.month) > (today.year, today.month):
+        raise ValueError(f"MES={month} is in the future: the TLC publishes each month about two months after it ends")
     return [month, month.comparison]
 
 
@@ -442,7 +459,12 @@ def _cli(argv: list[str]) -> int:
     """Tiny helper used by the Makefile: `months 2025-01` and `run-id`."""
     # end="": no trailing newline, so make's $(shell ...) never keeps a Windows "\r".
     if len(argv) == 2 and argv[0] == "months":
-        print(" ".join(m.label for m in months_for(argv[1])), end="")
+        try:
+            months = months_for(argv[1])
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        print(" ".join(m.label for m in months), end="")
         return 0
     if argv == ["run-id"]:
         print(_new_run_id(), end="")

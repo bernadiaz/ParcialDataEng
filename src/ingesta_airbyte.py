@@ -70,6 +70,8 @@ RETRY_DELAYS = (1, 2, 4)  # seconds between attempts: 1 try + 3 retries
 CHUNK = 8 * 1024 * 1024
 STALE_TOLERANCE = timedelta(minutes=2)  # clock skew allowed when spotting leftovers of older syncs
 ZONES_MES = "static"
+# The TLC CDN (CloudFront over S3) answers 403, not 404, for a file that does not exist yet.
+NOT_PUBLISHED = {403, 404}
 
 
 class IngestionError(RuntimeError):
@@ -560,6 +562,37 @@ def setup_airbyte(client: AirbyteClient, month: Month, sleep: Callable[[float], 
     return ids
 
 
+def month_published(month: Month, http: httpx.Client | None = None) -> bool | None:
+    """True/False when the TLC CDN says whether the month's file exists, None when it cannot tell
+    (network down, unexpected answer). `make all` asks before it starts, so a month the TLC has not
+    published yet fails at once with a clear message instead of halfway through the pipeline."""
+    client = http or httpx.Client(timeout=httpx.Timeout(20.0, connect=10.0), follow_redirects=True)
+    try:
+        response = client.head(YELLOW_URL_TEMPLATE.format(mes=month.label))
+    except httpx.HTTPError:
+        return None
+    finally:
+        if http is None:
+            client.close()
+    if cdn_refused(response):
+        return None  # the CDN refused to answer: it says nothing about the file
+    if response.status_code in NOT_PUBLISHED:
+        return False
+    return True if response.status_code < 400 else None
+
+
+def cdn_refused(response: httpx.Response) -> bool:
+    """CloudFront's own 403 page ("The request could not be satisfied", text/html): the CDN refused the
+    request, typically after too many requests from the same address in a few minutes. A file that does
+    not exist is answered by the file store behind it instead (403 AccessDenied, application/xml)."""
+    return response.status_code == 403 and "html" in response.headers.get("content-type", "").lower()
+
+
+CDN_REFUSED_HINT = ("the TLC CDN refused the request (HTTP 403 from CloudFront itself, not 'file not found'): it "
+                    "does that for a few minutes after too many requests from the same address. Wait about 10 "
+                    "minutes and run make all again; files already downloaded are not downloaded again")
+
+
 # --- the ingestion step ------------------------------------------------------------------------
 class Ingestor:
     def __init__(
@@ -761,8 +794,11 @@ class Ingestor:
             digest, size = hashlib.sha256(), 0
             try:
                 with self.http.stream("GET", url) as response:
-                    if response.status_code == 404:
-                        raise IngestionError(f"{url} not found (HTTP 404): the TLC publishes each month about two months late")
+                    if cdn_refused(response):
+                        raise IngestionError(f"{url}: {CDN_REFUSED_HINT}")
+                    if response.status_code in NOT_PUBLISHED:
+                        raise IngestionError(f"{url} not found (HTTP {response.status_code}): the TLC has not published "
+                                             f"this file (it publishes each month about two months after it ends)")
                     if response.status_code == 429 or response.status_code >= 500:
                         raise RetryableError(f"HTTP {response.status_code} from {url}")
                     response.raise_for_status()
