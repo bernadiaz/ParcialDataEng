@@ -161,8 +161,12 @@ BI_EXCLUDED_COLUMNS = {"fact_trips": ("trip_key", "source_file", "quality_flags"
 BI_RAW_TABLES = ("yellow_quarantine",)
 
 
-def export_bi_copy(settings: Settings) -> Path:
+def export_bi_copy(settings: Settings, month: Month | None = None) -> Path:
     """Offline mode: marts copied to a DuckDB file in v1.3 storage format (Superset 5 ships DuckDB 1.3).
+
+    The dashboards compare MES with the same month of the previous year, so the tables partitioned by
+    (year, month) only bring those two months: the warehouse keeps every month ever processed, and the
+    copy stays small however many months it holds. Without a month every row is copied.
 
     DuckDB 2.0 compresses text with DICT_FSST even in v1.3 files, and DuckDB 1.3 reads those columns
     back as NULL (zone names vanish and the airport filter matches nothing). The export disables that
@@ -189,17 +193,19 @@ def export_bi_copy(settings: Settings) -> Path:
             "AND table_name = ?", [schema, name]).fetchall()}
         excluded = [c for c in BI_EXCLUDED_COLUMNS.get(name, ()) if c in existing]
         select = f"* EXCLUDE ({', '.join(excluded)})" if excluded else "*"
-        con.execute(f"CREATE TABLE bi.{schema}.{name} AS SELECT {select} FROM wh.{schema}.{name}")
+        scope = (f" WHERE month = {month.month} AND year IN ({month.year}, {month.comparison.year})"
+                 if month is not None and {"year", "month"} <= existing else "")
+        con.execute(f"CREATE TABLE bi.{schema}.{name} AS SELECT {select} FROM wh.{schema}.{name}{scope}")
     con.execute("DETACH bi")
     con.close()
     os.replace(tmp, target)
-    log.info("offline BI copy: %s (%d tables)", target, len(tables))
+    log.info("offline BI copy: %s (%d tables%s)", target, len(tables), f", {month} and {month.comparison}" if month else "")
     return target
 
 
-def database_payload(settings: Settings) -> tuple[dict[str, Any], str]:
+def database_payload(settings: Settings, month: Month | None = None) -> tuple[dict[str, Any], str]:
     if settings.warehouse == "duckdb":
-        export_bi_copy(settings)
+        export_bi_copy(settings, month)
         return {
             "database_name": "NYC Taxi (DuckDB offline copy)",
             "sqlalchemy_uri": "duckdb:////app/data/bi/nyc_taxi_bi.duckdb",
@@ -251,16 +257,21 @@ select {p()} as period,
 from marts.fact_trips
 where {s()}
 group by 1""",
+        # Aggregated per day first (62 rows), then joined to dim_date: the join never sees trip rows.
         "nyc_daily": f"""
-select {p('f.')} as period, d.day_of_month, d.day_name, f.pickup_date,
-       count(*) as trips,
-       sum(f.total_amount) as revenue,
-       avg(f.fare_amount) as avg_fare,
-       100.0 * sum(case when f.cbd_congestion_fee > 0 then 1 else 0 end) / count(*) as pct_with_cbd_fee
-from marts.fact_trips as f
-join marts.dim_date as d on d.date_key = f.pickup_date
-where {s('f.')}
-group by 1, 2, 3, 4""",
+with by_day as (
+    select year, pickup_date,
+           count(*) as trips,
+           sum(total_amount) as revenue,
+           avg(fare_amount) as avg_fare,
+           100.0 * sum(case when cbd_congestion_fee > 0 then 1 else 0 end) / count(*) as pct_with_cbd_fee
+    from marts.fact_trips
+    where {s()}
+    group by year, pickup_date
+)
+select {p('b.')} as period, d.day_of_month, d.day_name, b.pickup_date, b.trips, b.revenue, b.avg_fare, b.pct_with_cbd_fee
+from by_day as b
+join marts.dim_date as d on d.date_key = b.pickup_date""",
         "nyc_hourly": f"""
 select {p()} as period, pickup_hour,
        sum(trips) as trips,
@@ -270,34 +281,45 @@ from marts.agg_zone_hour
 where {s()}
 group by 1, 2""",
         "nyc_weekday_hour": f"""
-select {p('a.')} as period,
+with by_date_hour as (
+    select year, pickup_date, pickup_hour, sum(trips) as trips
+    from marts.agg_zone_hour
+    where {s()}
+    group by year, pickup_date, pickup_hour
+)
+select {p('b.')} as period,
        concat(cast(d.day_of_week_iso as varchar), ' ', d.day_name) as weekday,
-       a.pickup_hour,
-       sum(a.trips) as trips
-from marts.agg_zone_hour as a
-join marts.dim_date as d on d.date_key = a.pickup_date
-where {s('a.')}
+       b.pickup_hour,
+       sum(b.trips) as trips
+from by_date_hour as b
+join marts.dim_date as d on d.date_key = b.pickup_date
 group by 1, 2, 3""",
         "nyc_borough": f"""
-select {p('a.')} as period, coalesce(z.borough, 'Unknown') as borough,
-       sum(a.trips) as trips, sum(a.total_revenue) as revenue
-from marts.agg_zone_hour as a
-join marts.dim_zone as z on z.location_id = a.pu_location_id
-where {s('a.')}
+with by_zone as (
+    select year, pu_location_id, sum(trips) as trips, sum(total_revenue) as revenue
+    from marts.agg_zone_hour
+    where {s()}
+    group by year, pu_location_id
+)
+select {p('b.')} as period, coalesce(z.borough, 'Unknown') as borough,
+       sum(b.trips) as trips, sum(b.revenue) as revenue
+from by_zone as b
+join marts.dim_zone as z on z.location_id = b.pu_location_id
 group by 1, 2""",
         "nyc_top_zones": f"""
-with top_zones as (
-    select pu_location_id from marts.agg_zone_hour
-    where year = {y} and month = {m}
-    group by pu_location_id order by sum(trips) desc limit 15
+with by_zone as (
+    select year, pu_location_id, sum(trips) as trips, sum(total_revenue) as revenue
+    from marts.agg_zone_hour
+    where {s()}
+    group by year, pu_location_id
+),
+top_zones as (
+    select pu_location_id from by_zone where year = {y} order by trips desc limit 15
 )
-select {p('a.')} as period, z.zone, z.borough,
-       sum(a.trips) as trips, sum(a.total_revenue) as revenue
-from marts.agg_zone_hour as a
-join top_zones as t on t.pu_location_id = a.pu_location_id
-join marts.dim_zone as z on z.location_id = a.pu_location_id
-where {s('a.')}
-group by 1, 2, 3""",
+select {p('b.')} as period, z.zone, z.borough, b.trips, b.revenue
+from by_zone as b
+join top_zones as t on t.pu_location_id = b.pu_location_id
+join marts.dim_zone as z on z.location_id = b.pu_location_id""",
         "nyc_zone_change": f"""
 with by_zone as (
     select pu_location_id,
@@ -325,30 +347,45 @@ select {p()} as period,
 from marts.fact_trips
 where {s()}
 group by 1, 2""",
+        # One pass over the trips: each one is joined to the 2 airport ids (not to the 265 zones) at
+        # both ends, aggregated by origin and destination airport, and only then split by direction.
         "nyc_airports": f"""
-select {p('f.')} as period, z.zone as airport, 'Pickup at the airport' as direction,
-       count(*) as trips, sum(f.fare_amount) as fare_sum, sum(f.total_amount) as total_sum,
-       sum(f.duration_min) as duration_sum, sum(f.trip_distance) as distance_sum
-from marts.fact_trips as f
-join marts.dim_zone as z on z.location_id = f.pu_location_id
-where {s('f.')} and z.zone in ('JFK Airport', 'LaGuardia Airport')
+with airports as (
+    select location_id, zone from marts.dim_zone where zone in ('JFK Airport', 'LaGuardia Airport')
+),
+by_airport as (
+    select f.year, pa.zone as pu_airport, da.zone as do_airport,
+           count(*) as trips, sum(f.fare_amount) as fare_sum, sum(f.total_amount) as total_sum,
+           sum(f.duration_min) as duration_sum, sum(f.trip_distance) as distance_sum
+    from marts.fact_trips as f
+    left join airports as pa on pa.location_id = f.pu_location_id
+    left join airports as da on da.location_id = f.do_location_id
+    where {s('f.')} and (pa.location_id is not null or da.location_id is not null)
+    group by f.year, pa.zone, da.zone
+)
+select {p()} as period, pu_airport as airport, 'Pickup at the airport' as direction,
+       sum(trips) as trips, sum(fare_sum) as fare_sum, sum(total_sum) as total_sum,
+       sum(duration_sum) as duration_sum, sum(distance_sum) as distance_sum
+from by_airport where pu_airport is not null
 group by 1, 2, 3
 union all
-select {p('f.')} as period, z.zone as airport, 'Dropoff at the airport' as direction,
-       count(*) as trips, sum(f.fare_amount) as fare_sum, sum(f.total_amount) as total_sum,
-       sum(f.duration_min) as duration_sum, sum(f.trip_distance) as distance_sum
-from marts.fact_trips as f
-join marts.dim_zone as z on z.location_id = f.do_location_id
-where {s('f.')} and z.zone in ('JFK Airport', 'LaGuardia Airport')
+select {p()} as period, do_airport as airport, 'Dropoff at the airport' as direction,
+       sum(trips) as trips, sum(fare_sum) as fare_sum, sum(total_sum) as total_sum,
+       sum(duration_sum) as duration_sum, sum(distance_sum) as distance_sum
+from by_airport where do_airport is not null
 group by 1, 2, 3""",
         "nyc_cbd_zones": f"""
-select z.zone, z.borough, count(*) as trips,
-       100.0 * sum(case when f.cbd_congestion_fee > 0 then 1 else 0 end) / count(*) as pct_with_cbd_fee
-from marts.fact_trips as f
-join marts.dim_zone as z on z.location_id = f.pu_location_id
-where f.year = {y} and f.month = {m}
-group by 1, 2
-having count(*) >= 1000""",
+with by_zone as (
+    select pu_location_id, count(*) as trips,
+           sum(case when cbd_congestion_fee > 0 then 1 else 0 end) as trips_with_fee
+    from marts.fact_trips
+    where year = {y} and month = {m}
+    group by pu_location_id
+    having count(*) >= 1000
+)
+select z.zone, z.borough, b.trips, 100.0 * b.trips_with_fee / b.trips as pct_with_cbd_fee
+from by_zone as b
+join marts.dim_zone as z on z.location_id = b.pu_location_id""",
         # Quality gate: every row read is accepted (fact_trips) or quarantined (raw.yellow_quarantine).
         "nyc_quality_totals": f"""
 with accepted as (
@@ -598,7 +635,7 @@ def build(settings: Settings, month: Month) -> dict[str, Any]:
     url = superset_url()
     api = SupersetAPI(url, os.environ.get("SUPERSET_ADMIN_USER", "admin").strip() or "admin", password)
 
-    db_payload, schema = database_payload(settings)
+    db_payload, schema = database_payload(settings, month)
     db_id = api.upsert("database", "database_name", db_payload)
     log.info("database %s -> id %s", db_payload["database_name"], db_id)
 

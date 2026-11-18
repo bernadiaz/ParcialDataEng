@@ -180,6 +180,27 @@ def test_bi_copy_avoids_compression_that_superset_duckdb_cannot_read(settings):
     con.close()
 
 
+def test_bi_copy_only_holds_the_two_months_of_the_comparison(settings):
+    import duckdb
+
+    from src.config import Month
+
+    settings.warehouse_db.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(str(settings.warehouse_db))
+    con.execute("CREATE SCHEMA marts")
+    con.execute("CREATE TABLE marts.dim_zone AS SELECT range::INTEGER AS location_id FROM range(5)")
+    con.execute("CREATE TABLE marts.fact_trips AS SELECT y AS year, m AS month FROM (VALUES (2025, 1), (2024, 1), "
+                "(2025, 2), (2024, 2), (2023, 2)) AS t(y, m)")
+    con.close()
+
+    path = dashboards.export_bi_copy(settings, Month(2025, 2))
+
+    con = duckdb.connect(str(path), read_only=True)
+    assert con.execute("SELECT year, month FROM marts.fact_trips ORDER BY year").fetchall() == [(2024, 2), (2025, 2)]
+    assert con.execute("SELECT count(*) FROM marts.dim_zone").fetchone()[0] == 5      # no month: copied whole
+    con.close()
+
+
 # --- make clean ----------------------------------------------------------------------------------------------
 def test_clean_keeps_dashboards_and_the_folders_docker_mounts(settings, monkeypatch):
     monkeypatch.setattr(dagster_instance, "wipe", lambda: None)
