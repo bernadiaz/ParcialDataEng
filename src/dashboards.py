@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -29,6 +30,7 @@ from src.config import Month, Settings, duckdb_config, get_logger, loopback
 
 log = get_logger("superset")
 MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+PERIOD_LABEL = re.compile(r"\b(?:" + "|".join(MONTH_ABBR) + r") \d{4}\b")  # "Feb 2025" in a chart name
 ASSIGNED_COLOR, COMPARISON_COLOR = "#1A85A0", "#B2B2B2"
 DEFAULT_URL = "http://localhost:8090"
 SUPERSET_DUCKDB_MEMORY = "512MB"  # per query budget of the offline copy inside the Superset container
@@ -99,6 +101,25 @@ class SupersetAPI:
             return self._ok(self.http.post(f"/api/v1/{resource}/", json=payload))["id"]
         self._ok(self.http.put(f"/api/v1/{resource}/{existing}", json=update if update is not None else payload))
         return existing
+
+    def dashboard_by_slug(self, slug: str) -> int | None:
+        """GET /api/v1/dashboard/<slug> answers with the dashboard or 404."""
+        response = self.http.get(f"/api/v1/dashboard/{slug}")
+        if response.status_code == 404:
+            return None
+        return self._ok(response)["result"]["id"]
+
+    def remove_stale_charts(self, dashboard_id: int, keep: set[int]) -> int:
+        """Deletes the charts of this dashboard built for an earlier comparison.
+
+        Chart names carry the period ("Trips Feb 2025"), so a run for another month creates its own
+        charts and the old ones would stay attached to the dashboard, out of its layout. Only charts
+        whose name has a period label are removed: a chart someone added by hand is left alone."""
+        charts = self._ok(self.http.get(f"/api/v1/dashboard/{dashboard_id}/charts")).get("result", [])
+        stale = [c["id"] for c in charts if c["id"] not in keep and PERIOD_LABEL.search(c.get("slice_name") or "")]
+        for chart_id in stale:
+            self._ok(self.http.delete(f"/api/v1/chart/{chart_id}"))
+        return len(stale)
 
     def refresh_dataset(self, dataset_id: int) -> None:
         self._ok(self.http.put(f"/api/v1/dataset/{dataset_id}/refresh"))
@@ -595,9 +616,14 @@ def build(settings: Settings, month: Month) -> dict[str, Any]:
     b = f"{MONTH_ABBR[month.month - 1]} {month.comparison.year}"
     built: list[dict[str, Any]] = []
     for spec in dashboards(month):
-        dash_id = api.upsert("dashboard", "dashboard_title",
-                             {"dashboard_title": spec["title"], "slug": spec["slug"], "published": True},
-                             update={"dashboard_title": spec["title"], "published": True})
+        # Matched by slug, which never changes: the title carries the months ("... Feb 2025 vs Feb 2024"),
+        # so matching by title would try to create a second dashboard with the same slug (HTTP 422).
+        dash_id = api.dashboard_by_slug(spec["slug"])
+        if dash_id is None:
+            dash_id = api._ok(api.http.post("/api/v1/dashboard/", json={
+                "dashboard_title": spec["title"], "slug": spec["slug"], "published": True}))["id"]
+        else:
+            api._ok(api.http.put(f"/api/v1/dashboard/{dash_id}", json={"dashboard_title": spec["title"], "published": True}))
         chart_ids: dict[str, int] = {}
         for row in spec["layout"]:
             for name, dataset, *rest in row:
@@ -616,7 +642,9 @@ def build(settings: Settings, month: Month) -> dict[str, Any]:
         api._ok(api.http.put(f"/api/v1/dashboard/{dash_id}", json={
             "position_json": json.dumps(position(spec["layout"], chart_ids, spec["title"])),
             "json_metadata": json.dumps(metadata), "published": True}))
-        log.info("dashboard %s -> /superset/dashboard/%s/ (%d charts)", spec["title"], spec["slug"], len(chart_ids))
+        removed = api.remove_stale_charts(dash_id, set(chart_ids.values()))
+        log.info("dashboard %s -> /superset/dashboard/%s/ (%d charts%s)", spec["title"], spec["slug"], len(chart_ids),
+                 f", {removed} charts of an earlier comparison removed" if removed else "")
         built.append({"title": spec["title"], "url": f"{url.rstrip('/')}/superset/dashboard/{spec['slug']}/",
                       "charts": len(chart_ids)})
     return {"database": db_payload["database_name"], "datasets": len(dataset_ids), "dashboards": built}
