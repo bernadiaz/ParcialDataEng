@@ -18,6 +18,9 @@ goes to the Postgres of docker compose (src/dagster_instance.py), which the Dags
 reads, so http://localhost:3003 shows each run as soon as it finishes.
 
     python -m src.orchestration --mes 2025-01      # the month and the same month of the previous year
+
+MES can be any month from 2010-01 (compared with 2009-01, the first TLC Parquet file) to the last month
+the TLC has published. Both are checked before anything runs.
     python -m src.run_tool dagster-ui 3003         # local UI, only when docker compose is not running
 
 No `from __future__ import annotations` here: Dagster inspects the real type of `context`.
@@ -28,7 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from src.config import ROOT, Month, Settings, dbt_target, months_for, track_step
+from src.config import ROOT, YELLOW_URL_TEMPLATE, Month, Settings, dbt_target, months_for, track_step
 
 os.environ.setdefault("DAGSTER_HOME", str(Settings.from_env().data_dir / "dagster_home"))
 os.environ.setdefault("DUCKDB_WAREHOUSE_PATH", str(Settings.from_env().warehouse_db))  # dbt duckdb target
@@ -54,7 +57,7 @@ from dagster import (  # noqa: E402
 from dagster_dbt import DbtCliResource, DbtProject, dbt_assets, get_asset_key_for_model  # noqa: E402
 
 from src import calidad, dagster_instance, dashboards, esquema, load_snowflake, resultados  # noqa: E402
-from src.ingesta_airbyte import Ingestor, IngestionLog  # noqa: E402
+from src.ingesta_airbyte import Ingestor, IngestionLog, month_published  # noqa: E402
 
 DBT_DIR = ROOT / "dbt_taxi"
 # Dynamic partitions = only the months the pipeline actually processes (scope of the exam: the
@@ -280,11 +283,35 @@ def register_months(instance: DagsterInstance, labels: list[str]) -> None:
         instance.add_dynamic_partitions(MONTHLY.name, new)
 
 
+def check_months(mes: str) -> list[Month] | None:
+    """The two months of MES, or None (after saying why) when they cannot be compared: MES older than
+    2010-01, in the future, or not published by the TLC yet (asked to the TLC CDN, unless the month was
+    already ingested in this DATA_DIR)."""
+    try:
+        months = months_for(mes)
+    except ValueError as exc:
+        print(f"Cannot run MES={mes}: {exc}", file=sys.stderr)
+        return None
+    settings = _settings()
+    log = IngestionLog(settings)
+    for month in months:
+        if log.last_ok("yellow", month.label):
+            continue
+        if month_published(month) is False:
+            print(f"Cannot run MES={mes}: the TLC has not published {month} yet "
+                  f"({YELLOW_URL_TEMPLATE.format(mes=month.label)} does not exist). It publishes each month about two "
+                  "months after it ends.", file=sys.stderr)
+            return None
+    return months
+
+
 def run(mes: str) -> int:
     """make all: zones, each month (partition), zones load, dbt + questions, dashboards. One Dagster run each."""
+    months = check_months(mes)
+    if months is None:
+        return 2
     storage = dagster_instance.configure()
     instance = DagsterInstance.get()
-    months = months_for(mes)
     register_months(instance, [m.label for m in months])
     os.environ["DBT_MONTHS"] = ",".join(m.label for m in months)
     os.environ["MES"] = mes

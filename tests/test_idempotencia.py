@@ -295,3 +295,27 @@ def test_warehouse_reload_of_a_month_does_not_duplicate_rows(settings, zones_fil
     trips_second = next(r for r in second if r.mes == "2025-01")
     assert (trips_first.rows_deleted, trips_first.rows_loaded) == (0, 2)
     assert (trips_second.rows_deleted, trips_second.rows_loaded) == (2, 2)
+
+
+def test_a_month_not_published_yet_fails_at_once(settings):
+    """The TLC CDN answers 403 (not 404) for a file that does not exist yet."""
+    waits: list[float] = []
+    http = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(403)))
+    with pytest.raises(IngestionError, match="has not published"):
+        Ingestor(settings, http=http, sleep=waits.append).yellow(Month(2030, 1))
+    assert waits == []
+    assert ingesta_airbyte.month_published(Month(2030, 1), http=http) is False
+    ok = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+    assert ingesta_airbyte.month_published(Month(2025, 1), http=ok) is True
+
+
+def test_a_refused_request_is_not_mistaken_for_a_missing_month(settings):
+    """CloudFront answers its own HTML 403 page when it throttles an address: that says nothing about the file."""
+    page = httpx.Response(403, headers={"content-type": "text/html"}, text="<H1>403 ERROR</H1> could not be satisfied")
+    http = httpx.Client(transport=httpx.MockTransport(lambda request: page))
+    assert ingesta_airbyte.month_published(Month(2025, 4), http=http) is None
+    with pytest.raises(IngestionError, match="refused the request"):
+        Ingestor(settings, http=http, sleep=lambda s: None).yellow(Month(2025, 4))
+    missing = httpx.Response(403, headers={"content-type": "application/xml"}, text="<Error><Code>AccessDenied</Code></Error>")
+    http = httpx.Client(transport=httpx.MockTransport(lambda request: missing))
+    assert ingesta_airbyte.month_published(Month(2030, 1), http=http) is False
