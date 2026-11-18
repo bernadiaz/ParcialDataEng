@@ -2,7 +2,7 @@
 # NYC Taxi pipeline - single entry point. `make all` runs the pipeline through Dagster.
 #
 #   docker compose up -d          Dagster UI, Grafana, Prometheus, Loki, Dozzle, Superset (or: make up)
-#   make all MES=2025-01          cloud: ingest -> schema -> quality -> load -> dbt -> questions ->
+#   make all MES=2025-01          cloud: ingest -> schema -> quality -> load -> dbt -> questions (results/2025/RESULTS_01.md) ->
 #                                 Superset dashboards, for MES and the same month of the previous year
 #   make all MES=2025-01 INGEST_MODE=direct WAREHOUSE=duckdb      the same, offline (no cloud account)
 #   make help                     list every target
@@ -127,7 +127,7 @@ dbt-run: ## dbt build: staging -> intermediate -> marts + tests (incremental by 
 dbt-docs: ## generate dbt docs (lineage and model descriptions)
 	$(DBT) docs generate $(DBT_ARGS)
 
-questions: ## run sql/q1..q6 against the marts and write RESULTADOS.md
+questions: ## run sql/q1..q6 against the marts and write results/YYYY/RESULTS_MM.md (Spanish, interpreted from the numbers)
 	$(PY) -m src.resultados --mes $(MES)
 
 test: $(VENV) ## pytest on synthetic data (no cloud account needed)
