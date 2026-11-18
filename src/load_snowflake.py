@@ -108,6 +108,9 @@ def snowflake_connect(step: str = "load") -> Any:
         "schema": "RAW",
         "session_parameters": {"QUERY_TAG": query_tag(step)},
         "client_session_keep_alive": False,
+        # The connector's own default, stated explicitly: connector 5.x warns (FutureWarning) on every
+        # connection that does not set it, because the default will change.
+        "enable_server_session_keep_alive_auto_detection": True,
     }
     key_path = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH", "").strip()
     if key_path:
