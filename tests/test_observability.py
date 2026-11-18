@@ -65,3 +65,31 @@ def test_rerun_replaces_the_data_metrics_of_the_group(gateway):
     group = gateway.groups[(observability.JOB, (("mes", "2025-01"), ("step", "quality")))]
     assert set(group) == {"nyc_taxi_rows"}  # the stale nyc_taxi_reconciled of the first run is gone
     assert group["nyc_taxi_rows"][0][1] == 2.0
+
+
+def test_a_run_keeps_only_the_groups_of_its_two_months(monkeypatch):
+    """make all MES=2025-02 removes the groups of other months, so Grafana shows its comparison only."""
+    import io
+    import json
+    import urllib.request
+
+    groups = [{"labels": {"job": observability.JOB, "step": step, "mes": mes}}
+              for step, mes in (("quality", "2025-01"), ("quality", "2024-01"), ("quality", "2025-02"),
+                                ("quality", "2024-02"), ("ingest-zones", "static"), ("dbt", "2025-02,2024-02"),
+                                ("dbt", "2025-01,2024-01"))]
+    groups.append({"labels": {"job": "another_job", "step": "x", "mes": "2020-01"}})
+    deleted: list[str] = []
+
+    def fake_urlopen(request, timeout=None):  # noqa: ARG001
+        if isinstance(request, urllib.request.Request) and request.get_method() == "DELETE":
+            deleted.append(request.full_url.split("/metrics/job/", 1)[1])
+            return io.BytesIO(b"")
+        return io.BytesIO(json.dumps({"status": "success", "data": groups}).encode())
+
+    monkeypatch.setenv("PUSHGATEWAY_URL", "http://pushgateway.test:9091")
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    removed = observability.keep_only_months(["2025-02", "2024-02"])
+
+    assert sorted(removed) == ["dbt/2025-01,2024-01", "quality/2024-01", "quality/2025-01"]
+    assert all(d.startswith(f"{observability.JOB}/step/") for d in deleted) and len(deleted) == 3
