@@ -6,8 +6,9 @@
   A data push (rows, violations, loads) replaces its group (PUT), so reruns overwrite instead of
   piling up. The step's run metrics (duration, RAM, success) are pushed with POST at the end of the
   step: POST replaces only the metrics with the same name, so they never wipe the data metrics the
-  step pushed into the same group. If the gateway is down, the pipeline logs one warning and
-  continues: observability must never break a run.
+  step pushed into the same group. If the gateway is down, the pipeline logs it once (INFO) and
+  continues: observability must never break a run. `make all` removes the groups of months that are
+  not part of its comparison, so the Grafana panels per month show the two months of the command.
 - Logs: besides stdout (Dozzle shows it when the pipeline runs in Docker), every log line is
   written as JSON to data/logs/pipeline.jsonl. Grafana Alloy tails that file and ships it to Loki.
 """
@@ -85,7 +86,9 @@ def push(step: str, mes: str, samples: Iterable[tuple[str, str, dict[str, str], 
         send(gateway, job=JOB, registry=registry, grouping_key={"step": step, "mes": mes}, timeout=3)
     except Exception as exc:  # gateway down or not installed: never fail the pipeline
         if not _warned:
-            logging.getLogger("observability").warning("Pushgateway %s not reachable (%s): metrics skipped", gateway, exc)
+            # INFO, not WARNING: running without the docker compose stack is a supported mode, and the
+            # end of `make all` already says that the stack is not running.
+            logging.getLogger("observability").info("Pushgateway %s not reachable (%s): metrics skipped", gateway, exc)
             _warned = True
 
 
@@ -97,3 +100,38 @@ def push_step(step: str, mes: str, seconds: float, peak_rss_mb: float | None, ok
         ("nyc_taxi_step_success", "1 if the last run of the step succeeded", {}, 1.0 if ok else 0.0),
         ("nyc_taxi_step_last_run_timestamp_seconds", "End time of the last run of the step", {}, now),
     ], replace=False)  # keep the data metrics the step pushed into the same group (e.g. quality)
+
+
+def keep_only_months(labels: Iterable[str]) -> list[str]:
+    """Deletes the Pushgateway groups of months that are not part of this run.
+
+    `make all MES=...` compares two months, so the Grafana panels per month (rows per outcome, rule
+    violations, loads) show those two months and nothing else. The groups of other months are deleted
+    from the Pushgateway only: Prometheus keeps their history, so older runs stay visible by moving
+    the time range. Groups without a month (static zone lookup) and the combined dbt group of this
+    run are kept. Returns the deleted "step/mes" groups. Never fails the pipeline."""
+    gateway = _gateway()
+    if not gateway:
+        return []
+    keep = set(labels)
+    keep |= {"static", "-", ",".join(sorted(keep, reverse=True)), ",".join(sorted(keep))}
+    deleted: list[str] = []
+    try:
+        import urllib.request
+        from urllib.parse import quote
+
+        with urllib.request.urlopen(f"{gateway.rstrip('/')}/api/v1/metrics", timeout=3) as response:
+            groups = json.loads(response.read().decode("utf-8")).get("data", [])
+        for group in groups:
+            labels_of = group.get("labels", {})
+            step, mes = labels_of.get("step"), labels_of.get("mes")
+            if labels_of.get("job") != JOB or step is None or mes is None or mes in keep:
+                continue
+            url = f"{gateway.rstrip('/')}/metrics/job/{quote(JOB, safe='')}/step/{quote(step, safe='')}/mes/{quote(mes, safe='')}"
+            urllib.request.urlopen(urllib.request.Request(url, method="DELETE"), timeout=3).close()
+            deleted.append(f"{step}/{mes}")
+    except Exception as exc:  # gateway down: nothing to clean, and observability never breaks a run
+        logging.getLogger("observability").info("Pushgateway %s: groups of other months not cleaned (%s)", gateway, exc)
+    if deleted:
+        logging.getLogger("observability").info("Pushgateway: removed %d groups of months outside this run", len(deleted))
+    return deleted

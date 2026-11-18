@@ -63,7 +63,7 @@ from dagster_dbt import (  # noqa: E402
     get_asset_key_for_model,
 )
 
-from src import calidad, dagster_instance, dashboards, esquema, load_snowflake, resultados  # noqa: E402
+from src import calidad, dagster_instance, dashboards, esquema, load_snowflake, observability, resultados  # noqa: E402
 from src.ingesta_airbyte import Ingestor, IngestionLog, month_published  # noqa: E402
 
 DBT_DIR = ROOT / "dbt_taxi"
@@ -327,6 +327,8 @@ def run(mes: str) -> int:
     storage = dagster_instance.configure()
     instance = DagsterInstance.get()
     register_months(instance, [m.label for m in months])
+    # Grafana shows the months of this comparison: Pushgateway groups of other months are removed.
+    observability.keep_only_months([m.label for m in months])
     os.environ["DBT_MONTHS"] = ",".join(m.label for m in months)
     os.environ["MES"] = mes
     dagster_url = f"http://localhost:{os.environ.get('DAGSTER_UI_PORT', '').strip() or '3003'}"
