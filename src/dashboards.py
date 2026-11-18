@@ -516,8 +516,7 @@ def dashboards(month: Month) -> list[dict[str, Any]]:
         {
             "title": f"NYC Taxi | Congestion Relief Zone (CBD fee): {a} vs {b}", "slug": "nyc-taxi-cbd",
             "layout": [
-                [("md", f"### MTA Congestion Relief Zone toll\nThe per-trip `cbd_congestion_fee` starts on **Jan 5, 2025**. "
-                        f"In {b} the column did not exist, so it is NULL (not 0) in the warehouse.", 12, 14)],
+                [("md", cbd_markdown(month), 12, 14)],
                 [("Share of trips with CBD fee - " + a, "nyc_monthly_kpis",
                   big_number(metric("MAX(pct_trips_with_cbd_fee)", "% trips"), a, "% of trips with fee > 0", ",.1f"), 4, 50),
                  ("Daily share of trips with CBD fee (%)", "nyc_daily",
@@ -588,6 +587,30 @@ def dashboards(month: Month) -> list[dict[str, Any]]:
         },
     ]
     return rows
+
+
+def cbd_markdown(month: Month) -> str:
+    """Header of the CBD dashboard, written for the two months being compared."""
+    from datetime import datetime
+
+    from src.calidad import load_rules
+
+    params, _ = load_rules()
+    start = datetime.fromisoformat(str(params.get("cbd_fee_start", "2025-01-05 00:00:00"))).date()
+
+    def label(m: Month) -> str:
+        return f"{MONTH_ABBR[m.month - 1]} {m.year}"
+
+    lines = [f"### MTA Congestion Relief Zone toll\nThe per-trip `cbd_congestion_fee` starts on "
+             f"**{MONTH_ABBR[start.month - 1]} {start.day}, {start.year}**."]
+    for m in (month, month.comparison):
+        if (m.year, m.month) < (start.year, start.month):
+            lines.append(f"In {label(m)} the toll did not exist yet: the column is NULL (not 0) in the warehouse.")
+        elif (m.year, m.month) == (start.year, start.month):
+            lines.append(f"{label(m)} has the toll from day {start.day} on, so its monthly share is diluted by the first days.")
+    if (month.comparison.year, month.comparison.month) >= (start.year, start.month):
+        lines.append("Both months have the toll, so their shares can be compared directly.")
+    return " ".join(lines)
 
 
 def rules_markdown() -> str:
