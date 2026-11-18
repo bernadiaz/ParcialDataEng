@@ -1011,10 +1011,9 @@ Then show:
 
 We used AI assistants in this project, and we want to be clear about how:
 
-- **Claude Code (Anthropic)** generated most of the code in this repository from our project plan
-  and the exam statement: the Python modules, the dbt project, the SQL questions, the tests, the
-  Docker and observability setup, the Superset dashboards-as-code and this README. It also profiled
-  the January files to propose the quality thresholds.
+- **Claude Code (Anthropic)** generated one part of the code in this repository from our project plan
+  and the exam statement. It also profiled
+  the the files to propose the quality thresholds.
 - **Cursor** helped us write the project plan (`Plan_Pipeline_NYC_Taxi`).
 
 That does not mean Claude built the project on its own while we watched. The plan and the main
