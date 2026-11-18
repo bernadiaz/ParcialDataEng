@@ -1,4 +1,7 @@
 -- agg_zone_hour must have one row per (zone, date, hour) and add up to fact_trips per month.
+-- It reads two models, so meta.dagster.ref attaches it to agg_zone_hour: Dagster shows it as an asset
+-- check of that model instead of logging a warning about a test it cannot place.
+{{ config(meta={'dagster': {'ref': {'name': 'agg_zone_hour'}}}) }}
 with duplicated as (
     select pu_location_id, pickup_date, pickup_hour
     from {{ ref('agg_zone_hour') }}
