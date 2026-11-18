@@ -319,3 +319,19 @@ def test_a_refused_request_is_not_mistaken_for_a_missing_month(settings):
     missing = httpx.Response(403, headers={"content-type": "application/xml"}, text="<Error><Code>AccessDenied</Code></Error>")
     http = httpx.Client(transport=httpx.MockTransport(lambda request: missing))
     assert ingesta_airbyte.month_published(Month(2030, 1), http=http) is False
+
+
+def test_rows_are_counted_in_parquet_csv_and_gzip_csv(tmp_path):
+    """Airbyte's S3 destination writes the zone lookup as 0.csv.gz; the polygons zip has no rows to count."""
+    import gzip
+
+    plain = tmp_path / "zones.csv"
+    plain.write_text(ZONES_CSV, encoding="utf-8")
+    packed = tmp_path / "0.csv.gz"
+    packed.write_bytes(gzip.compress(ZONES_CSV.encode()))
+    (tmp_path / "taxi_zones.zip").write_bytes(b"PK")
+    rows = len(ZONES_CSV.strip().splitlines()) - 1
+    assert ingesta_airbyte.count_rows(plain) == rows
+    assert ingesta_airbyte.count_rows(packed) == rows
+    assert ingesta_airbyte.count_rows(tmp_path / "taxi_zones.zip") is None
+    assert ingesta_airbyte.count_rows(write_tlc_parquet(tmp_path / "m.parquet", [trip(), trip()])) == 2
