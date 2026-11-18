@@ -113,10 +113,15 @@ def sha256_file(path: Path) -> str:
 
 
 def count_rows(path: Path) -> int | None:
-    """Parquet: footer metadata (no full read). CSV: data rows. Anything else (the zone shapes zip): None."""
-    if path.suffix not in {".parquet", ".csv"}:
+    """Parquet: footer metadata (no full read). CSV, also gzip-compressed (Airbyte's S3 destination writes
+    the zone lookup as 0.csv.gz): data rows. Anything else (the zone polygons zip): None."""
+    name = path.name.lower()
+    if name.endswith(".parquet"):
+        reader = "read_parquet"
+    elif name.endswith((".csv", ".csv.gz")):
+        reader = "read_csv"
+    else:
         return None
-    reader = "read_parquet" if path.suffix == ".parquet" else "read_csv"
     with duckdb.connect(config=duckdb_config()) as con:
         return con.execute(f"SELECT count(*) FROM {reader}('{path.as_posix()}')").fetchone()[0]
 
@@ -761,7 +766,8 @@ class Ingestor:
         objects = self.s3.list(prefix)
         stale = [o["key"] for o in objects if o["last_modified"] < started - STALE_TOLERANCE]
         if stale:  # overwrite safety net: only objects of this month's prefix, older than this sync
-            log.warning("%s %s: removing %d objects left by older syncs", dataset, mes, len(stale))
+            # Expected on every re-sync: Airbyte names each sync's files anew, so the previous ones are replaced.
+            log.info("%s %s: replacing %d objects of the previous sync", dataset, mes, len(stale))
             self.s3.delete(stale)
         fresh = [o for o in objects if o["key"] not in set(stale)]
         if not fresh:
