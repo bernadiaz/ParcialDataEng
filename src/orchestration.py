@@ -54,7 +54,14 @@ from dagster import (  # noqa: E402
     define_asset_job,
     materialize,
 )
-from dagster_dbt import DbtCliResource, DbtProject, dbt_assets, get_asset_key_for_model  # noqa: E402
+from dagster_dbt import (  # noqa: E402
+    DagsterDbtTranslator,
+    DagsterDbtTranslatorSettings,
+    DbtCliResource,
+    DbtProject,
+    dbt_assets,
+    get_asset_key_for_model,
+)
 
 from src import calidad, dagster_instance, dashboards, esquema, load_snowflake, resultados  # noqa: E402
 from src.ingesta_airbyte import Ingestor, IngestionLog, month_published  # noqa: E402
@@ -217,7 +224,13 @@ def warehouse_raw_taxi_zones(context: AssetExecutionContext) -> MaterializeResul
 
 
 # --- dbt (staging -> intermediate -> marts) --------------------------------------------------------------------
-@dbt_assets(manifest=DBT_PROJECT.manifest_path, project=DBT_PROJECT)
+# Every dbt test becomes a Dagster asset check, so `dbt build` never logs a test Dagster cannot place:
+# - tests on the RAW sources (not_null, unique) are checks of raw/yellow_trips and raw/taxi_zones;
+# - the singular tests that join two models name their model in meta.dagster.ref (dbt_taxi/tests).
+DBT_TRANSLATOR = DagsterDbtTranslator(settings=DagsterDbtTranslatorSettings(enable_source_tests_as_checks=True))
+
+
+@dbt_assets(manifest=DBT_PROJECT.manifest_path, project=DBT_PROJECT, dagster_dbt_translator=DBT_TRANSLATOR)
 def dbt_models(context: AssetExecutionContext, dbt: DbtCliResource):
     """dbt build. fact_trips / agg_zone_hour only reprocess the months in DBT_MONTHS (set by make)."""
     settings = _settings()
@@ -259,6 +272,7 @@ def superset_dashboards(context: AssetExecutionContext, config: QuestionsConfig)
 
 MONTHLY_ASSETS = [raw_yellow_trips, yellow_schema_report, curated_yellow_trips, warehouse_raw_yellow_trips,
                   warehouse_raw_yellow_quarantine]
+RAW_SOURCE_KEYS = [AssetKey(["raw", "yellow_trips"]), AssetKey(["raw", "yellow_quarantine"]), AssetKey(["raw", "taxi_zones"])]
 ALL_ASSETS = [taxi_zone_lookup, *MONTHLY_ASSETS, warehouse_raw_taxi_zones, dbt_models, resultados_md, superset_dashboards]
 RESOURCES = {"dbt": DbtCliResource(project_dir=DBT_PROJECT, profiles_dir=str(DBT_DIR), target=_target(),
                                    dbt_executable=DBT_EXE)}
@@ -319,11 +333,20 @@ def run(mes: str) -> int:
     ui = dagster_url if storage == "postgres" else f"`make dagster-ui` ({dagster_url})"
     mes_config = {"config": {"mes": mes}}
 
-    def step(selection: list, partition_key: str | None = None, run_config: dict | None = None) -> bool:
-        result = materialize(ALL_ASSETS, selection=AssetSelection.assets(*selection), partition_key=partition_key, instance=instance,
+    def step(selection: list | AssetSelection, partition_key: str | None = None, run_config: dict | None = None) -> bool:
+        chosen = selection if isinstance(selection, AssetSelection) else AssetSelection.assets(*selection)
+        result = materialize(ALL_ASSETS, selection=chosen, partition_key=partition_key, instance=instance,
                              resources=RESOURCES, run_config=run_config, raise_on_error=False,
                              tags={"mes": mes})
         return result.success
+
+    # The dbt tests on the RAW sources are asset checks of the warehouse assets, but they run inside
+    # `dbt build`: they belong to the dbt step (selected there, so Dagster expects their results) and are
+    # left out of the load steps (otherwise each load would start dbt again just for them).
+    raw_checks = AssetSelection.checks_for_assets(*RAW_SOURCE_KEYS)
+    monthly = AssetSelection.assets(*MONTHLY_ASSETS).without_checks() | AssetSelection.checks_for_assets(curated_yellow_trips)
+    zones_load = AssetSelection.assets(warehouse_raw_taxi_zones).without_checks()
+    models = AssetSelection.assets(dbt_models, resultados_md) | raw_checks
 
     def dashboards_step() -> bool:
         if not dashboards.superset_expected():
@@ -333,10 +356,10 @@ def run(mes: str) -> int:
         return step([superset_dashboards], run_config={"ops": {"superset_dashboards": mes_config}})
 
     plan = [(lambda: step([taxi_zone_lookup]))]
-    plan += [(lambda m=m: step(MONTHLY_ASSETS, partition_key=m.label)) for m in months]
+    plan += [(lambda m=m: step(monthly, partition_key=m.label)) for m in months]
     plan += [
-        lambda: step([warehouse_raw_taxi_zones]),
-        lambda: step([dbt_models, resultados_md], run_config={"ops": {"resultados_md": mes_config}}),
+        lambda: step(zones_load),
+        lambda: step(models, run_config={"ops": {"resultados_md": mes_config}}),
         dashboards_step,
     ]
     for action in plan:

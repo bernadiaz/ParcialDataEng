@@ -1,5 +1,7 @@
 -- Reconciliation inside the warehouse: for every month, fact_trips must hold exactly the rows of
 -- RAW.YELLOW_TRIPS (nothing lost or duplicated by the joins). Returns the months that differ.
+-- It reads RAW and fact_trips, so meta.dagster.ref attaches it to fact_trips (a Dagster asset check).
+{{ config(meta={'dagster': {'ref': {'name': 'fact_trips'}}}) }}
 with raw_counts as (
     select year, month, count(*) as raw_rows
     from {{ source('raw', 'yellow_trips') }}
