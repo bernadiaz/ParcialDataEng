@@ -15,6 +15,19 @@
 #   (unknown_columns). Airbyte metadata columns (_airbyte_*) are expected and ignored silently.
 # - When a source type differs from the contract the value is TRY_CAST, and the schema report
 #   counts the values that could not be cast.
+# - value_map: text codes of the 2009-2010 files (CASH, Cre, VTS...) translated to today's codes.
+#   Keys are compared upper-cased and trimmed; a value with no key is TRY_CAST like any other.
+#   Applied when the source column is text or its type differs from the contract.
+# - derive_from: the 2009-2010 files have no zone ids, only coordinates. When the zone id column is
+#   missing and both coordinate columns exist, the id is derived by placing the point inside the TLC
+#   taxi zone polygons (taxi_zones.zip, DuckDB spatial): 264 (Unknown) for a missing or zero
+#   coordinate, 265 (Outside of NYC) for a point outside every zone.
+# The TLC Parquet files start in January 2009. Their schema changed over time (all handled here):
+#   2009       vendor_name, Trip_Pickup_DateTime, Start_Lon/Start_Lat, Payment_Type 'CASH'... (text)
+#   2010       vendor_id 'VTS', pickup_datetime, pickup_longitude/latitude, payment_type 'Cre'...
+#   2011-2018  today's names; airport_fee / congestion_surcharge stored as INT32 (NULL)
+#   2019-2023  passenger_count and RatecodeID stored as DOUBLE
+#   2025-      cbd_congestion_fee; 2026-09 adds request_source (not in the contract: ignored)
 # Descriptions follow the TLC data dictionary (March 18, 2025).
 version: 1
 dataset: yellow_tripdata
@@ -25,17 +38,22 @@ columns:
     type: INTEGER
     required: true
     nullable: false
-    source_aliases: [VendorID]
+    source_aliases: [VendorID, vendor_name]
+    # 2009-2010: CMT and VTS (VeriFone, today Curb) are today's 1 and 2. DDS (Digital Dispatch
+    # Systems) never got a numeric code, so it stays NULL and the schema report counts it.
+    value_map: {CMT: 1, VTS: 2}
     description: "TPEP provider: 1 Creative Mobile Technologies, 2 Curb Mobility, 6 Myle Technologies, 7 Helix."
   - name: tpep_pickup_datetime
     type: TIMESTAMP
     required: true
     nullable: false
+    source_aliases: [Trip_Pickup_DateTime, pickup_datetime]
     description: Date and time when the meter was engaged (NYC local time, no time zone).
   - name: tpep_dropoff_datetime
     type: TIMESTAMP
     required: true
     nullable: false
+    source_aliases: [Trip_Dropoff_DateTime, dropoff_datetime]
     description: Date and time when the meter was disengaged.
   - name: passenger_count
     type: BIGINT
@@ -51,40 +69,49 @@ columns:
     type: BIGINT
     required: true
     nullable: true
-    source_aliases: [RatecodeID]
+    source_aliases: [RatecodeID, Rate_Code, rate_code]
     description: "Final rate code: 1 Standard, 2 JFK, 3 Newark, 4 Nassau/Westchester, 5 Negotiated, 6 Group ride, 99 Null/unknown."
   - name: store_and_fwd_flag
     type: VARCHAR
     required: true
     nullable: true
+    source_aliases: [store_and_forward]
+    value_map: {"0": "N", "1": "Y", "0.0": "N", "1.0": "Y"}
     description: "Y = record held in vehicle memory before sending (store and forward), N = not."
   - name: pu_location_id
     type: INTEGER
     required: true
     nullable: false
     source_aliases: [PULocationID]
+    derive_from: {longitude: [Start_Lon, pickup_longitude], latitude: [Start_Lat, pickup_latitude]}
     description: TLC Taxi Zone where the meter was engaged.
   - name: do_location_id
     type: INTEGER
     required: true
     nullable: false
     source_aliases: [DOLocationID]
+    derive_from: {longitude: [End_Lon, dropoff_longitude], latitude: [End_Lat, dropoff_latitude]}
     description: TLC Taxi Zone where the meter was disengaged.
   - name: payment_type
     type: BIGINT
     required: true
     nullable: false
+    # 2009-2010 text codes (CASH, Cash, CAS / Credit, CREDIT, CRE, Cre / No Charge, No / Dispute, Dis).
+    value_map: {CREDIT: 1, CRE: 1, CRD: 1, CASH: 2, CAS: 2, CSH: 2, NO CHARGE: 3, "NO": 3, NOC: 3,
+                DISPUTE: 4, DIS: 4, UNKNOWN: 5, UNK: 5, VOIDED TRIP: 6, VOI: 6}
     description: "0 Flex Fare, 1 Credit card, 2 Cash, 3 No charge, 4 Dispute, 5 Unknown, 6 Voided trip."
   - name: fare_amount
     type: DOUBLE
     required: true
     nullable: false
+    source_aliases: [Fare_Amt]
     description: Time-and-distance fare calculated by the meter (USD).
   - name: extra
     type: DOUBLE
     required: true
     nullable: false
-    description: Miscellaneous extras and surcharges.
+    source_aliases: [surcharge]
+    description: Miscellaneous extras and surcharges (called surcharge in 2009-2010).
   - name: mta_tax
     type: DOUBLE
     required: true
@@ -94,33 +121,36 @@ columns:
     type: DOUBLE
     required: true
     nullable: false
+    source_aliases: [Tip_Amt]
     description: Credit card tips only. Cash tips are not included.
   - name: tolls_amount
     type: DOUBLE
     required: true
     nullable: false
+    source_aliases: [Tolls_Amt]
     description: Total amount of all tolls paid in the trip.
   - name: improvement_surcharge
     type: DOUBLE
-    required: true
+    required: false
     nullable: false
-    description: Improvement surcharge assessed at the flag drop.
+    description: Improvement surcharge assessed at the flag drop (since 2015; absent in 2009-2010 files -> NULL).
   - name: total_amount
     type: DOUBLE
     required: true
     nullable: false
+    source_aliases: [Total_Amt]
     description: Total charged to passengers. Does not include cash tips.
   - name: congestion_surcharge
     type: DOUBLE
-    required: true
+    required: false
     nullable: true
-    description: NYS congestion surcharge collected in the trip.
+    description: NYS congestion surcharge collected in the trip (since 2019; absent in 2009-2010 files -> NULL).
   - name: airport_fee
     type: DOUBLE
-    required: true
+    required: false
     nullable: true
     source_aliases: [Airport_fee]
-    description: Fee for pick up only at LaGuardia and JFK airports.
+    description: Fee for pick up only at LaGuardia and JFK airports (since 2022; absent in 2009-2010 files -> NULL).
   - name: cbd_congestion_fee
     type: DOUBLE
     required: false

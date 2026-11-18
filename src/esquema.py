@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -70,12 +71,19 @@ class SchemaReport:
     type_mismatches: dict[str, str] = field(default_factory=dict)
     cast_failures: dict[str, int] = field(default_factory=dict)
     null_violations: dict[str, int] = field(default_factory=dict)
+    source_types: dict[str, str] = field(default_factory=dict)  # source column -> type in the file
+    value_mapped: list[str] = field(default_factory=list)  # contract columns whose text codes were translated
+    # contract column -> [longitude column, latitude column] it is derived from (2009-2010 files)
+    derived: dict[str, list[str]] = field(default_factory=dict)
+    # contract column -> rows set to 264 Unknown (no coordinate) / 265 Outside of NYC (no zone)
+    derived_unresolved: dict[str, dict[str, int]] = field(default_factory=dict)
 
     @property
     def status(self) -> str:
         if self.missing_required:
             return "fail"
-        if self.new_columns or self.type_mismatches or self.cast_failures or self.null_violations:
+        if (self.new_columns or self.type_mismatches or self.cast_failures or self.null_violations
+                or self.derived):
             return "warning"
         return "ok"
 
@@ -85,14 +93,19 @@ def _describe(con: duckdb.DuckDBPyConnection, relation: str) -> dict[str, str]:
 
 
 def _resolve(source_types: dict[str, str], contract: dict[str, Any], report: SchemaReport) -> None:
-    """Maps every source column to a contract column (aliases first, then snake_case)."""
+    """Maps every source column to a contract column (aliases first, then snake_case).
+
+    A missing column with `derive_from` is derived when both of its coordinate columns exist; the
+    coordinate columns are then inputs, not new columns."""
     lookup: dict[str, str] = {}
     for column in contract["columns"]:
         lookup[column["name"]] = column["name"]
         for alias in column.get("source_aliases", []):
             lookup[alias] = column["name"]
     prefixes = tuple(contract.get("ignored_column_prefixes", []))
+    report.source_types = {c: t for c, t in source_types.items() if c not in READER_COLUMNS}
 
+    unmatched: list[str] = []
     for source in source_types:
         if source in READER_COLUMNS:
             continue
@@ -101,7 +114,7 @@ def _resolve(source_types: dict[str, str], contract: dict[str, Any], report: Sch
             continue
         target = lookup.get(source) or lookup.get(to_snake(source))
         if target is None:
-            report.new_columns.append(source)
+            unmatched.append(source)
             continue
         if target in report.mapping.values():
             raise SchemaError(f"{report.dataset} {report.mes}: two source columns map to {target!r}")
@@ -109,48 +122,189 @@ def _resolve(source_types: dict[str, str], contract: dict[str, Any], report: Sch
 
     mapped = set(report.mapping.values())
     by_name = {column["name"]: column for column in contract["columns"]}
+    used_inputs: set[str] = set()
     for name, column in by_name.items():
-        if name not in mapped:
-            target_list = report.missing_required if column.get("required", True) else report.missing_optional
-            target_list.append(name)
+        if name in mapped:
+            continue
+        derive = column.get("derive_from") or {}
+        sources = [next((c for c in derive.get(role, []) if c in source_types), None) for role in ("longitude", "latitude")]
+        if derive and all(sources):
+            report.derived[name] = [str(c) for c in sources]
+            used_inputs.update(report.derived[name])
+            continue
+        target_list = report.missing_required if column.get("required", True) else report.missing_optional
+        target_list.append(name)
+    report.new_columns = [c for c in unmatched if c not in used_inputs]
     for source, target in report.mapping.items():
         expected = by_name[target]["type"].upper()
         actual = source_types[source].upper()
         if actual != expected:
             report.type_mismatches[target] = f"{actual} -> {expected}"
+            if by_name[target].get("value_map"):
+                report.value_mapped.append(target)
 
 
-def _select_list(contract: dict[str, Any], report: SchemaReport) -> list[str]:
+def _applies_value_map(column: dict[str, Any], source_type: str) -> bool:
+    """Text codes (and numbers stored where text is expected) go through the column's value_map."""
+    actual, expected = source_type.upper(), column["type"].upper()
+    return bool(column.get("value_map")) and (actual == "VARCHAR" or actual != expected)
+
+
+def _literal(value: Any) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _source_expression(column: dict[str, Any], source: str, report: SchemaReport, qualifier: str = "") -> str:
+    """TRY_CAST to the contract type; legacy text codes go through the column's value_map first."""
+    ref = f'{qualifier}"{source}"'
+    cast = f"TRY_CAST({ref} AS {column['type']})"
+    if not _applies_value_map(column, report.source_types.get(source, column["type"])):
+        return cast
+    is_text = column["type"].upper() == "VARCHAR"
+    whens = " ".join(
+        f"WHEN {_literal(str(key).strip().upper())} THEN {_literal(value) if is_text else int(value)}"
+        for key, value in column["value_map"].items()
+    )
+    return f"CASE upper(trim(CAST({ref} AS VARCHAR))) {whens} ELSE {cast} END"
+
+
+# Coordinates that cannot be a place: the zone id becomes 264 (Unknown), as the TLC does for trips
+# without a zone. A real coordinate outside every taxi zone becomes 265 (Outside of NYC).
+UNKNOWN_ZONE, OUTSIDE_NYC_ZONE = 264, 265
+
+
+def _derived_expression(name: str, inputs: list[str], qualifier: str = "r.") -> str:
+    lon, lat = (f'{qualifier}"{c}"' for c in inputs)
+    return (f"CASE WHEN {lon} IS NULL OR {lat} IS NULL OR {lon} = 0 OR {lat} = 0 OR abs({lon}) > 180 OR abs({lat}) > 90 "
+            f"THEN {UNKNOWN_ZONE} ELSE coalesce(geo_{name}.location_id, {OUTSIDE_NYC_ZONE}) END")
+
+
+def _select_list(contract: dict[str, Any], report: SchemaReport, qualifier: str = "") -> list[str]:
     inverse = {target: source for source, target in report.mapping.items()}
     columns = []
     for column in contract["columns"]:
         name, kind = column["name"], column["type"]
         source = inverse.get(name)
-        columns.append(f'TRY_CAST("{source}" AS {kind}) AS {name}' if source else f"CAST(NULL AS {kind}) AS {name}")
+        if source:
+            columns.append(f"{_source_expression(column, source, report, qualifier)} AS {name}")
+        elif name in report.derived:
+            columns.append(f"CAST({_derived_expression(name, report.derived[name], qualifier)} AS {kind}) AS {name}")
+        else:
+            columns.append(f"CAST(NULL AS {kind}) AS {name}")
     return columns
 
 
 def _profile(con: duckdb.DuckDBPyConnection, relation: str, view: str, contract: dict[str, Any], report: SchemaReport) -> None:
-    """Counts values lost by TRY_CAST and NULLs in non-nullable columns (one scan each)."""
+    """Counts values lost by TRY_CAST (or by a value_map with no key for them), NULLs in non-nullable
+    columns and zone ids that could not be derived (one scan each)."""
     inverse = {target: source for source, target in report.mapping.items()}
     by_name = {column["name"]: column for column in contract["columns"]}
-    if report.type_mismatches:
+    checked = list(report.type_mismatches)  # a column read with its contract type cannot fail the cast
+    if checked:
         parts = [
             f'count(*) FILTER (WHERE "{inverse[target]}" IS NOT NULL '
-            f'AND TRY_CAST("{inverse[target]}" AS {by_name[target]["type"]}) IS NULL)'
-            for target in report.type_mismatches
+            f'AND ({_source_expression(by_name[target], inverse[target], report)}) IS NULL)'
+            for target in checked
         ]
         values = con.execute(f"SELECT {', '.join(parts)} FROM {relation}").fetchone()
-        report.cast_failures = {t: int(v) for t, v in zip(report.type_mismatches, values) if v}
+        report.cast_failures = {t: int(v) for t, v in zip(checked, values) if v}
     not_nullable = [c["name"] for c in contract["columns"] if not c.get("nullable", True) and c["name"] in inverse]
     if not_nullable:
         parts = [f"count(*) FILTER (WHERE {name} IS NULL)" for name in not_nullable]
         values = con.execute(f"SELECT {', '.join(parts)} FROM {view}").fetchone()
         report.null_violations = {n: int(v) for n, v in zip(not_nullable, values) if v}
+    if report.derived:
+        parts = [f"count(*) FILTER (WHERE {name} = {zone})" for name in report.derived
+                 for zone in (UNKNOWN_ZONE, OUTSIDE_NYC_ZONE)]
+        values = iter(con.execute(f"SELECT {', '.join(parts)} FROM {view}").fetchone())
+        report.derived_unresolved = {
+            name: {"unknown_264": int(next(values)), "outside_nyc_265": int(next(values))} for name in report.derived}
 
 
 def _file_list(files: list[Path]) -> str:
     return "[" + ", ".join(f"'{path.as_posix()}'" for path in files) + "]"
+
+
+# --- zone ids from coordinates (2009-2010 files) ---------------------------------------------------------
+# Greater NYC: points outside this box are never inside a taxi zone, so they skip the spatial join.
+NYC_BOUNDS = {"lon": (-74.30, -73.65), "lat": (40.45, 40.95)}
+COORDINATE_DECIMALS = 4  # about 11 m: far fewer distinct points, and no taxi zone is that thin
+
+
+def _load_spatial(con: duckdb.DuckDBPyConnection) -> None:
+    try:
+        con.execute("LOAD spatial")
+    except duckdb.Error:
+        try:
+            con.execute("INSTALL spatial")
+            con.execute("LOAD spatial")
+        except duckdb.Error as exc:
+            raise SchemaError(
+                "The 2009-2010 TLC files have coordinates instead of zone ids. Placing them in the taxi zones "
+                f"needs DuckDB's spatial extension, which could not be installed: {exc}") from exc
+
+
+def zone_shapes(con: duckdb.DuckDBPyConnection, settings: Settings) -> Path:
+    """Curated taxi zone polygons in longitude/latitude, built once from the TLC shapefile.
+
+    taxi_zones.zip comes from the TLC (downloaded and logged by the ingestion step the first time a
+    month needs it). Its polygons are in NY State Plane feet (EPSG:2263) and are stored here as WKB
+    in EPSG:4326, the coordinates of the trip records."""
+    target = settings.curated_zone_shapes_file
+    if target.exists():
+        return target
+    archive = settings.zone_shapes_dir / "taxi_zones.zip"
+    if not archive.exists():
+        from src.ingesta_airbyte import Ingestor
+
+        archive = Ingestor(settings).zone_shapes()
+    import zipfile
+
+    unpacked = settings.data_dir / "tmp" / "zone_shapes"
+    shutil.rmtree(unpacked, ignore_errors=True)
+    with zipfile.ZipFile(archive) as bundle:
+        bundle.extractall(unpacked)
+    shapefile = next(unpacked.rglob("*.shp"), None)
+    if shapefile is None:
+        raise SchemaError(f"{archive} has no .shp file")
+    _load_spatial(con)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".tmp.parquet")
+    con.execute(
+        f"""COPY (
+            SELECT CAST(LocationID AS INTEGER) AS location_id, zone, borough,
+                   ST_AsWKB(ST_Transform(geom, 'EPSG:2263', 'EPSG:4326', always_xy := true)) AS geom_wkb
+            FROM ST_Read('{shapefile.as_posix()}')
+            ORDER BY location_id
+        ) TO '{tmp.as_posix()}' (FORMAT PARQUET)""")
+    tmp.replace(target)
+    shutil.rmtree(unpacked, ignore_errors=True)
+    log.info("taxi zone polygons: %s", settings.relative(target))
+    return target
+
+
+def derive_zone_ids(con: duckdb.DuckDBPyConnection, settings: Settings, relation: str, report: SchemaReport) -> None:
+    """Temp table geo_points: every distinct (rounded) coordinate of the month inside greater NYC and
+    the taxi zone that contains it. The yellow_src view looks each trip end up in it."""
+    _load_spatial(con)
+    shapes = zone_shapes(con, settings)
+    con.execute(f"CREATE OR REPLACE TEMP TABLE zone_polygons AS SELECT location_id, ST_GeomFromWKB(geom_wkb) AS geom "
+                f"FROM read_parquet('{shapes.as_posix()}')")
+    points = " UNION ALL ".join(f'SELECT "{lon}" AS lon, "{lat}" AS lat FROM {relation}' for lon, lat in report.derived.values())
+    (lon_min, lon_max), (lat_min, lat_max) = NYC_BOUNDS["lon"], NYC_BOUNDS["lat"]
+    con.execute(
+        f"""CREATE OR REPLACE TEMP TABLE geo_points AS
+        WITH points AS (
+            SELECT DISTINCT round(lon, {COORDINATE_DECIMALS}) AS lon, round(lat, {COORDINATE_DECIMALS}) AS lat
+            FROM ({points}) AS p
+            WHERE lon BETWEEN {lon_min} AND {lon_max} AND lat BETWEEN {lat_min} AND {lat_max}
+        )
+        SELECT p.lon, p.lat, min(z.location_id) AS location_id
+        FROM points AS p
+        JOIN zone_polygons AS z ON ST_Intersects(z.geom, ST_Point(p.lon, p.lat))
+        GROUP BY p.lon, p.lat""")
+    located = con.execute("SELECT count(*) FROM geo_points").fetchone()[0]
+    log.info("yellow %s: zone ids derived from coordinates (%s distinct points inside a zone)", report.mes, f"{located:,}")
 
 
 def register_yellow_month(
@@ -172,13 +326,20 @@ def register_yellow_month(
         _persist(settings, report)
         raise SchemaError(f"yellow {month}: missing required columns {report.missing_required}")
 
+    joins = ""
+    if report.derived:
+        derive_zone_ids(con, settings, relation, report)
+        joins = " ".join(
+            f'LEFT JOIN geo_points AS geo_{name} ON geo_{name}.lon = round(r."{lon}", {COORDINATE_DECIMALS}) '
+            f'AND geo_{name}.lat = round(r."{lat}", {COORDINATE_DECIMALS})'
+            for name, (lon, lat) in report.derived.items())
     data_root = settings.data_dir.as_posix().rstrip("/") + "/"
     con.execute(
         f"""CREATE OR REPLACE TEMP VIEW yellow_src AS
-            SELECT {', '.join(_select_list(contract, report))},
-                   replace(filename, '{data_root}', '') AS source_file,
-                   file_row_number AS source_row_number
-            FROM {relation}"""
+            SELECT {', '.join(_select_list(contract, report, qualifier="r."))},
+                   replace(r.filename, '{data_root}', '') AS source_file,
+                   r.file_row_number AS source_row_number
+            FROM {relation} AS r {joins}"""
     )
     _profile(con, relation, "yellow_src", contract, report)
     _persist(settings, report)
@@ -260,6 +421,9 @@ def _persist(settings: Settings, report: SchemaReport) -> None:
         f"- Type differences (TRY_CAST to the contract type): {bullet(report.type_mismatches)}",
         f"- Values that could not be cast (became NULL): {bullet(report.cast_failures)}",
         f"- NULLs in non-nullable columns (handled by the quality rules): {bullet(report.null_violations)}",
+        f"- Legacy text codes translated (value_map): {bullet(report.value_mapped)}",
+        f"- Zone ids derived from coordinates: {bullet({k: '/'.join(v) for k, v in report.derived.items()})}",
+        f"- Derived zone ids without a zone (264 Unknown / 265 Outside of NYC): {bullet(report.derived_unresolved)}",
         "",
         "| source column | contract column |",
         "|---|---|",
@@ -271,7 +435,9 @@ def _persist(settings: Settings, report: SchemaReport) -> None:
     with control_db(settings) as con:
         con.execute("DELETE FROM schema_report WHERE dataset = ? AND mes = ? AND run_id = ?", [report.dataset, report.mes, RUN_ID])
         con.execute(
-            "INSERT INTO schema_report VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())",
+            "INSERT INTO schema_report (run_id, dataset, mes, files, missing_required, missing_optional, new_columns, "
+            "type_mismatches, cast_failures, null_violations, status, value_mapped, derived_columns, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now())",
             [
                 RUN_ID,
                 report.dataset,
@@ -284,13 +450,21 @@ def _persist(settings: Settings, report: SchemaReport) -> None:
                 json.dumps(report.cast_failures),
                 json.dumps(report.null_violations),
                 report.status,
+                json.dumps(report.value_mapped),
+                json.dumps({"inputs": report.derived, "unresolved": report.derived_unresolved}),
             ],
         )
-    level = log.warning if report.status != "ok" else log.info
+    # Deviations the contract absorbs (new column ignored, retyped column cast, missing optional column,
+    # zone ids derived) are reported at INFO: the run is right and the report explains them. WARNING is
+    # kept for values that were really lost (a value that could not be cast, a NULL where the contract
+    # forbids it) and ERROR for a missing required column (the run stops).
+    lost = report.cast_failures or report.null_violations
+    level = log.error if report.status == "fail" else log.warning if lost else log.info
     level(
-        "schema %s %s: status=%s new=%s missing_optional=%s type_diffs=%s cast_failures=%s",
+        "schema %s %s: status=%s new=%s missing_optional=%s type_diffs=%s cast_failures=%s null_violations=%s%s",
         report.dataset, report.mes, report.status, report.new_columns, report.missing_optional,
-        report.type_mismatches, report.cast_failures,
+        report.type_mismatches, report.cast_failures, report.null_violations,
+        f" derived={list(report.derived)}" if report.derived else "",
     )
 
 

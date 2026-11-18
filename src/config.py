@@ -134,6 +134,8 @@ SQL_DIR = ROOT / "sql"
 TLC_BASE_URL = "https://d37ci6vzurychx.cloudfront.net"
 YELLOW_URL_TEMPLATE = TLC_BASE_URL + "/trip-data/yellow_tripdata_{mes}.parquet"
 ZONES_URL = TLC_BASE_URL + "/misc/taxi_zone_lookup.csv"
+# Taxi zone polygons: only needed for the 2009-2010 files, which have coordinates instead of zone ids.
+ZONE_SHAPES_URL = TLC_BASE_URL + "/misc/taxi_zones.zip"
 
 _MES_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
 
@@ -283,6 +285,15 @@ class Settings:
     def raw_zones_dir(self) -> Path:
         return self.raw_dir / "zones"
 
+    @property
+    def zone_shapes_dir(self) -> Path:
+        return self.raw_dir / "zone_shapes"
+
+    @property
+    def curated_zone_shapes_file(self) -> Path:
+        """Zone polygons in longitude/latitude (WKB), built once from taxi_zones.zip."""
+        return self.curated_dir / "zones" / "taxi_zone_shapes.parquet"
+
     def curated_month_dir(self, month: Month) -> Path:
         return self.curated_dir / "yellow" / month.partition
 
@@ -354,6 +365,13 @@ CONTROL_DDL = (
 )
 
 
+# Columns added after the first release: an existing control database gains them on the next run.
+CONTROL_MIGRATIONS = (
+    "ALTER TABLE schema_report ADD COLUMN IF NOT EXISTS value_mapped VARCHAR",
+    "ALTER TABLE schema_report ADD COLUMN IF NOT EXISTS derived_columns VARCHAR",
+)
+
+
 def connect_duckdb_file(path: Path, *, read_only: bool = False, attempts: int = 8) -> duckdb.DuckDBPyConnection:
     """Opens a DuckDB file with the pipeline's memory budget (duckdb_config), retrying briefly when
     another process (sync client, antivirus) holds it."""
@@ -372,6 +390,8 @@ def control_db(settings: Settings) -> duckdb.DuckDBPyConnection:
     """Local control database: ingestion_log, schema/quality reports and run metrics."""
     con = connect_duckdb_file(settings.control_db)
     for ddl in CONTROL_DDL:
+        con.execute(ddl)
+    for ddl in CONTROL_MIGRATIONS:
         con.execute(ddl)
     return con
 
