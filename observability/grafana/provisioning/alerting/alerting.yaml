@@ -1,0 +1,3 @@
+# No alert rules are provisioned. The file exists because Grafana logs an error at start when this
+# provisioning folder is missing (and a warning for any file that is not YAML).
+apiVersion: 1

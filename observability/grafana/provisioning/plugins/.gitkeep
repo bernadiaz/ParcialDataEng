@@ -1,1 +1,0 @@
-# Empty on purpose: Grafana logs an error at start when a provisioning folder is missing.
