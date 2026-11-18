@@ -2,6 +2,7 @@
 #
 # predicate: DuckDB SQL that is TRUE when the row VIOLATES the rule. A NULL predicate counts as
 #            "not violated", so predicates handle NULLs explicitly when NULL must be a violation.
+# descripcion: the same description in Spanish, for the Spanish results reports (results/).
 # severity:  reject  -> the row goes to quarantine with every reject rule it violated.
 #            warning -> the row is kept and the rule id is added to the quality_flags column.
 # Helper columns built before the rules run: duration_sec, pu_zone_exists, do_zone_exists,
@@ -24,6 +25,7 @@ rules:
     name: pickup_outside_file_month
     severity: reject
     description: Pickup timestamp is missing or outside the month of the source file.
+    descripcion: Pickup sin fecha o fuera del mes del archivo.
     threshold: "pickup year/month <> processed year/month"
     rationale: >-
       Rows of another month would land in another partition and break partition replacement:
@@ -34,6 +36,7 @@ rules:
     name: dropoff_not_after_pickup
     severity: reject
     description: Dropoff timestamp is missing, before or equal to the pickup timestamp.
+    descripcion: Dropoff sin fecha, anterior o igual al pickup.
     threshold: "duration <= 0 seconds"
     rationale: A trip with non-positive duration is physically impossible and breaks duration and speed.
     predicate: "tpep_dropoff_datetime IS NULL OR tpep_dropoff_datetime <= tpep_pickup_datetime"
@@ -42,6 +45,7 @@ rules:
     name: distance_out_of_range
     severity: reject
     description: Trip distance is missing, zero or negative, or above the fixed maximum.
+    descripcion: Distancia faltante, cero o negativa, o mayor al máximo fijado.
     threshold: "trip_distance <= 0 or > {max_trip_distance_miles} miles"
     rationale: >-
       Distance is the base of speed and fare per mile. Zero/negative distance is a meter or GPS
@@ -52,6 +56,7 @@ rules:
     name: negative_total_amount
     severity: reject
     description: Total amount is missing or negative.
+    descripcion: Total cobrado faltante o negativo.
     threshold: "total_amount < 0"
     rationale: >-
       Negative totals are reversals (mostly dispute, no charge and cash), not trips. Keeping them
@@ -62,6 +67,7 @@ rules:
     name: passenger_count_missing_or_zero
     severity: warning
     description: Passenger count is NULL or 0.
+    descripcion: Cantidad de pasajeros NULL o 0.
     threshold: "passenger_count IS NULL or = 0"
     rationale: >-
       NULL is structural on Flex Fare trips (payment_type 0): 4.7% of 2024-01 vs 15.5% of 2025-01.
@@ -72,6 +78,7 @@ rules:
     name: unknown_zone
     severity: reject
     description: Pickup or dropoff zone does not exist in the taxi zone lookup.
+    descripcion: Zona de origen o destino que no existe en el lookup de zonas.
     threshold: "location id not in taxi_zone_lookup"
     rationale: Without a valid zone the trip cannot join dim_zone, and zone-based questions would lose it silently.
     predicate: "NOT pu_zone_exists OR NOT do_zone_exists"
@@ -80,6 +87,7 @@ rules:
     name: exact_duplicate
     severity: reject
     description: Exact duplicate of another row of the same file (every contract column equal).
+    descripcion: Duplicado exacto de otra fila del mismo archivo.
     threshold: "second and later copies"
     rationale: The first copy is kept as accepted and the extra copies go to quarantine, so trips are not double counted.
     predicate: "dup_rank > 1"
@@ -88,6 +96,7 @@ rules:
     name: tip_out_of_range
     severity: warning
     description: Tip is negative or greater than the fare.
+    descripcion: Propina negativa o mayor que la tarifa.
     threshold: "tip_amount < 0 or tip_amount > fare_amount"
     rationale: >-
       Unusual but possible (generous tips on short fares, adjustments). The money was charged, so the
@@ -98,6 +107,7 @@ rules:
     name: implausible_average_speed
     severity: reject
     description: Average speed over the whole trip is above the fixed maximum (own rule, found exploring the data).
+    descripcion: Velocidad media del viaje mayor al máximo fijado.
     threshold: "trip_distance / duration > {max_avg_speed_mph} mph"
     rationale: >-
       Found while exploring: trips of a few seconds with several miles (1,107 rows in 2024-01, 982 in
@@ -109,6 +119,7 @@ rules:
     name: cbd_fee_anomaly
     severity: warning
     description: CBD congestion fee is negative, or charged before the toll existed.
+    descripcion: Peaje CBD negativo, o cobrado antes de que existiera.
     threshold: "cbd_congestion_fee < 0, or > 0 with pickup before {cbd_fee_start}"
     rationale: >-
       Found while exploring 2025-01: 6,553 rows with -0.75 (reversals) and 401 rows charged before

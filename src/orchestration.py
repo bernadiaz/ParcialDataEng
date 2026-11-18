@@ -5,8 +5,8 @@ Asset graph (monthly partitions, key = YYYY-MM):
     taxi_zone_lookup ─┐
     raw_yellow_trips ─┴─> yellow_schema_report ─> curated_yellow_trips ─> raw/yellow_trips ─┐
                                                    (asset check: reconciliation)            ├─> dbt models ─┬─> resultados_md
-    taxi_zone_lookup ──────────────────────────────────────────────────> raw/taxi_zones ───┘   (staging ->  └─> superset_dashboards
-                                                                                                marts)
+    taxi_zone_lookup ──────────────────────────────────────────────────> raw/taxi_zones ───┘   (staging ->  │   (results/YYYY/RESULTS_MM.md)
+                                                                                                marts)      └─> superset_dashboards
 
 raw/yellow_trips and raw/taxi_zones are the warehouse tables loaded by src/load_snowflake.py.
 They share their asset keys with the dbt sources, so the lineage continues into the dbt models.
@@ -244,13 +244,15 @@ class QuestionsConfig(Config):
 
 
 @asset(group_name="analytics", kinds={"sql"},
-       deps=[get_asset_key_for_model([dbt_models], name) for name in ("fact_trips", "agg_zone_hour", "dim_zone")],
-       description="sql/q1..q6 against the marts -> RESULTADOS.md")
+       deps=[get_asset_key_for_model([dbt_models], name)
+             for name in ("fact_trips", "agg_zone_hour", "dim_zone", "dim_date", "agg_quarantine_rule")],
+       description="sql/q1..q6 and sql/contexto against the marts -> results/YYYY/RESULTS_MM.md (MES vs the same month of "
+                   "the previous year, interpreted in Spanish from the numbers of the run) and the README")
 def resultados_md(context: AssetExecutionContext, config: QuestionsConfig) -> MaterializeResult:
     settings = _settings()
     with track_step(settings, "questions", config.mes):
         path = resultados.write_results(settings, Month.parse(config.mes))
-    return MaterializeResult(metadata={"path": MetadataValue.path(str(path))})
+    return MaterializeResult(metadata={"results": MetadataValue.path(str(path))})
 
 
 @asset(group_name="analytics", kinds={"superset"},
@@ -285,7 +287,7 @@ defs = Definitions(
                          description="ingest -> schema -> quality -> load for one month"),
         define_asset_job("reference_data", AssetSelection.assets(taxi_zone_lookup, warehouse_raw_taxi_zones)),
         define_asset_job("warehouse_models", AssetSelection.assets(dbt_models, resultados_md, superset_dashboards),
-                         description="dbt build + RESULTADOS.md + Superset dashboards"),
+                         description="dbt build + results/YYYY/RESULTS_MM.md + Superset dashboards"),
     ],
 )
 
@@ -368,7 +370,8 @@ def run(mes: str) -> int:
         if not action():
             print(f"Dagster run failed: open {ui} (Runs) for the step logs.", file=sys.stderr)
             return 1
-    print(f"Pipeline finished for {', '.join(m.label for m in months)}.")
+    print(f"Pipeline finished for {', '.join(m.label for m in months)}. Results (Spanish): "
+          f"{resultados.results_file(months[0]).relative_to(ROOT).as_posix()}")
     _print_stack_status()
     return 0
 
