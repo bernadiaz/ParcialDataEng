@@ -47,6 +47,7 @@ from src.config import (
     ROOT,
     RUN_ID,
     YELLOW_URL_TEMPLATE,
+    ZONE_SHAPES_URL,
     ZONES_URL,
     Month,
     Settings,
@@ -109,8 +110,10 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def count_rows(path: Path) -> int:
-    """Parquet: footer metadata (no full read). CSV: data rows."""
+def count_rows(path: Path) -> int | None:
+    """Parquet: footer metadata (no full read). CSV: data rows. Anything else (the zone shapes zip): None."""
+    if path.suffix not in {".parquet", ".csv"}:
+        return None
     reader = "read_parquet" if path.suffix == ".parquet" else "read_csv"
     with duckdb.connect(config=duckdb_config()) as con:
         return con.execute(f"SELECT count(*) FROM {reader}('{path.as_posix()}')").fetchone()[0]
@@ -587,6 +590,8 @@ class Ingestor:
         Airbyte's File source loads a whole month into pandas (about 2.5 GB for 3.5M rows), which does not
         fit next to the Airbyte platform on an 8 GB machine. The direct path keeps memory constant and
         lands the original, unmodified file. If Airbyte cannot be reached, see _airbyte_ready()."""
+        if dataset == "zone_shapes":  # a zip of polygons: no Airbyte connection for it, always direct
+            return "direct"
         if self.settings.ingest_mode == "hybrid":
             mode = "airbyte" if dataset == "zones" else "direct"
         else:
@@ -637,6 +642,13 @@ class Ingestor:
     def yellow(self, month: Month) -> None:
         url = YELLOW_URL_TEMPLATE.format(mes=month.label)
         self._ingest("yellow", month, url, self.settings.raw_month_dir(month), f"yellow_tripdata_{month.label}.parquet")
+
+    def zone_shapes(self) -> Path:
+        """TLC taxi zone polygons (taxi_zones.zip). Only the 2009-2010 files need them: they carry
+        coordinates instead of zone ids (see esquema.derive_zone_ids)."""
+        self._ingest("zone_shapes", None, ZONE_SHAPES_URL, self.settings.zone_shapes_dir, "taxi_zones.zip")
+        return self.settings.zone_shapes_dir / "taxi_zones.zip"
+
 
     # -- shared logic
     def _ingest(self, dataset: str, month: Month | None, url: str, mirror_dir: Path, file_name: str) -> None:
@@ -779,7 +791,9 @@ class Ingestor:
         self.log.append(dataset=dataset, mes=mes, url=url, mode="direct", action="downloaded",
                         attempts=attempts, status="ok", **entry)
         IngestionLog.push_metrics(dataset, mes, [entry], "downloaded", attempts, ok=True)
-        log.info("%s %s: downloaded %s bytes, sha256=%s..., %s rows", dataset, mes, f"{size:,}", digest[:12], f"{entry['row_count']:,}")
+        rows = entry["row_count"]
+        log.info("%s %s: downloaded %s bytes, sha256=%s...%s", dataset, mes, f"{size:,}", digest[:12],
+                 f", {rows:,} rows" if rows is not None else "")
 
 
 def _project_connections(client: AirbyteClient) -> dict[str, dict[str, str]]:
