@@ -1,12 +1,14 @@
 """Shared settings, month handling, paths, logging, control database and step metrics."""
 from __future__ import annotations
 
+import builtins
 import logging
 import os
 import re
 import sys
 import time
 import uuid
+import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,6 +34,36 @@ for _name, _value in list(os.environ.items()):
 
 if load_dotenv is not None and os.environ.get("NYC_TAXI_LOAD_DOTENV", "1") != "0":
     load_dotenv(ROOT / ".env", override=False)
+
+
+# --- known notices of third-party libraries that say nothing about this pipeline ----------------------------
+# The Snowflake connector 5.x warns that dbt-snowflake passes parameters it no longer reads
+# (reuse_connections, insecure_mode, ocsp_root_certs_dict_lock_timeout) and that a default will change,
+# and it logs at WARNING that it read the proxy settings of the environment (even when there are none).
+# None of them is a problem of the run, and repeated on every connection they hid real warnings. They
+# are silenced one by one (exact messages, never a whole category), here and, through PYTHONWARNINGS,
+# in the dbt and Dagster processes started afterwards.
+KNOWN_WARNINGS = (
+    ("Unknown parameter 'reuse_connections'", "UserWarning"),
+    ("Unknown parameter 'insecure_mode'", "UserWarning"),
+    ("Unknown parameter 'ocsp_root_certs_dict_lock_timeout'", "UserWarning"),
+    ("enable_server_session_keep_alive_auto_detection was not set", "FutureWarning"),
+)
+for _message, _category in KNOWN_WARNINGS:
+    warnings.filterwarnings("ignore", message=re.escape(_message), category=getattr(builtins, _category))
+_python_warnings = [w for w in os.environ.get("PYTHONWARNINGS", "").split(",") if w.strip()]
+os.environ["PYTHONWARNINGS"] = ",".join(
+    _python_warnings + [f"ignore:{m}:{c}" for m, c in KNOWN_WARNINGS if f"ignore:{m}:{c}" not in _python_warnings])
+
+
+class _DropProxyNotice(logging.Filter):
+    """Drops the connector's 'Proxy configuration: using environment variable proxy settings' line."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.getMessage().startswith("Proxy configuration: using environment variable proxy settings")
+
+
+logging.getLogger("snowflake.connector._core").addFilter(_DropProxyNotice())
 
 # Path settings in .env are portable: "~" is the user's home on Windows, Linux and macOS, and
 # relative paths are relative to the repository. They are expanded once here, so every tool
