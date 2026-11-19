@@ -1,6 +1,8 @@
 # NYC Taxi Pipeline: a month against the same month of the previous year
 
-### Defensa Parcial Ing de Datos - UTN FRT 2026
+### Defensa Parcial Fundamentos de Ingenierpia de Datos - UTN FRT 2026
+
+**Docente:** Dr. Pedro Bernabé Araujo
 
 **Integrantes:** Bernabe Diaz Alvillos y Franco Nahuel Herrera
 
