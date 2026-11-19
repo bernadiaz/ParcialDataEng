@@ -1,0 +1,7 @@
+# Build context of the images built from the repository root (docker-compose.yml): the Dagster UI only
+# needs pyproject.toml, and the pipeline image (Dockerfile) needs requirements.txt and its make wrapper.
+# The code is mounted at run time, and .venv, data and .env must never reach an image.
+*
+!pyproject.toml
+!requirements.txt
+!docker/pipeline-make.sh
