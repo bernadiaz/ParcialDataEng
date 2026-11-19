@@ -4,17 +4,17 @@
 
 | | |
 |---|---|
-| Comando | `make all MES=2025-01 INGEST_MODE=direct WAREHOUSE=duckdb` |
-| Modo | local, sin nube: los archivos se descargan de la TLC, la calidad corre en DuckDB y el warehouse es un archivo DuckDB |
-| Consultas | marts de dbt en DuckDB |
+| Comando | `make all MES=2025-01` |
+| Modo | nube: Airbyte lleva la tabla de zonas y los archivos mensuales se copian sin cambios de la TLC a S3 (INGEST_MODE=hybrid), la calidad corre en DuckDB y el warehouse es Snowflake |
+| Consultas | marts de dbt en Snowflake |
 | Archivos de la TLC | `yellow_tripdata_2025-01.parquet` y `yellow_tripdata_2024-01.parquet` |
-| Corrida | `20261118T045101Z-8ea17a`, 2026-11-18 04:51 UTC |
+| Corrida | `20261119T000959Z-6caedd`, 2026-11-19 00:18 UTC |
 
 Las interpretaciones no son texto fijo: `src/interpretacion.py` las redacta en cada corrida a partir de los resultados de las consultas, de las consultas de contexto (`sql/contexto/`) y de los reportes de esquema y de calidad de cada archivo. Los montos están en dólares; las tarifas mayores a US$ 500 se señalan como atípicas porque ninguna regla de calidad les pone un tope.
 
 ## Calidad de los datos y cuarentena
 
-Antes de responder las preguntas, cada archivo parquet de la TLC pasa por el contrato de esquema (`contracts/yellow_schema.yaml`) y por las reglas de calidad (`contracts/quality_rules.yaml`). Cada fila leída termina en un solo lugar: **aceptada** (capa curated, y de ahí al warehouse y a los marts) o **en cuarentena** (`<DATA_DIR>/quarantine/yellow/year=2025/month=01/` y el mismo camino para 2024, la tabla `raw.yellow_quarantine`). Una fila en cuarentena conserva sus valores originales, el archivo y el número de fila de origen (`source_file`, `source_row_number`) y las reglas de rechazo que violó (`violated_rules`). Las reglas `warning` no descartan la fila: solo la marcan en `quality_flags`. Si en algún mes `leídas = aceptadas + cuarentena` no se cumpliera, el pipeline se detiene antes de publicar ese mes.
+Antes de responder las preguntas, cada archivo parquet de la TLC pasa por el contrato de esquema (`contracts/yellow_schema.yaml`) y por las reglas de calidad (`contracts/quality_rules.yaml`). Cada fila leída termina en un solo lugar: **aceptada** (capa curated, y de ahí al warehouse y a los marts) o **en cuarentena** (`<DATA_DIR>/quarantine/yellow/year=2025/month=01/` y el mismo camino para 2024, la tabla `RAW.YELLOW_QUARANTINE`, además de una copia en `s3://<bucket>/quarantine/yellow/`). Una fila en cuarentena conserva sus valores originales, el archivo y el número de fila de origen (`source_file`, `source_row_number`) y las reglas de rechazo que violó (`violated_rules`). Las reglas `warning` no descartan la fila: solo la marcan en `quality_flags`. Si en algún mes `leídas = aceptadas + cuarentena` no se cumpliera, el pipeline se detiene antes de publicar ese mes.
 
 | mes | archivo | filas en el parquet | leídas | aceptadas | cuarentena | % cuarentena | aceptadas con warnings | reconcilia |
 |---|---|---:|---:|---:|---:|---:|---:|---|
@@ -324,4 +324,4 @@ inner join by_month as c on a.year = ${YEAR} and c.year = ${CMP_YEAR}
 - El peaje de congestión (CBD) alcanza al 66,0 % de los viajes de enero 2025. Las zonas con mayor proporción de cobro también crecen en viajes (Stuy Town/Peter Cooper Village +56,3 %, Alphabet City +117,2 % y Union Sq +24,1 %): en este mes no se observa una caída de demanda donde se cobra. Es una correlación, no una medición de causa.
 - El viaje promedio es más corto (3,16 contra 3,29 millas) y más barato sin contar las tarifas mayores a US$ 500: la mediana sigue en US$ 12,80, así que el cambio viene de la mezcla de viajes (más Flex Fare, menos aeropuertos y menos viajes largos). La propina con tarjeta no se mueve (26,3 % → 26,3 %).
 - Los promedios son frágiles: 40 viajes con tarifas mayores a US$ 500 (el mayor, de US$ 863.372,12, en 2025) alcanzan para mover el ranking de horas, la tarifa media de los aeropuertos y la tarifa media del mes, por eso se reportan también la mediana y el promedio sin tarifas mayores a US$ 500. La siguiente regla de calidad a agregar es un tope de tarifa o de tarifa por milla.
-- Los archivos traen cambios de formato que el pipeline absorbe sin romperse (enero 2024: no trae cbd_congestion_fee, que queda en NULL). La cuarentena es del 4,37 % y del 3,16 % de las filas leídas y los dos meses reconcilian. Las cifras salen de los marts de dbt en DuckDB (modo local) y se reproducen con `make all MES=2025-01 INGEST_MODE=direct WAREHOUSE=duckdb`.
+- Los archivos traen cambios de formato que el pipeline absorbe sin romperse (enero 2024: no trae cbd_congestion_fee, que queda en NULL). La cuarentena es del 4,37 % y del 3,16 % de las filas leídas y los dos meses reconcilian. Las cifras salen de los marts de dbt en Snowflake y se reproducen con `make all MES=2025-01`.
