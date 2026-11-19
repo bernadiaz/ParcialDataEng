@@ -252,7 +252,7 @@ ParcialDataEng/
 ## Fuera de alcance
 
 - Pipeline “todos los meses” (solo param).
-- Airflow/Prefect/Dagster/PySpark.
+- Airflow/Prefect/PySpark.
 - Materializar marts de vuelta a Parquet local (el mart vive en Snowflake).
 - `run.sh` o CLI único monolítico.
 - Commits/Co-authored-by de Cursor.
