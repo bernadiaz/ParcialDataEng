@@ -358,7 +358,7 @@ BT
 (- Pipeline 'todos los meses' \(solo parametro\).) Tj
 /F1 10 Tf
 1 0 0 1 54 401 Tm
-(- Airflow / Prefect / Dagster / PySpark.) Tj
+(- Airflow / Prefect / PySpark.) Tj
 /F1 10 Tf
 1 0 0 1 54 386 Tm
 (- Materializar marts de vuelta a Parquet local.) Tj
