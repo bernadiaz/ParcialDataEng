@@ -1,10 +1,10 @@
 # NYC Taxi Pipeline: a month against the same month of the previous year
 
-### Defensa Parcial de Fundamentos de Ingeniería de Datos - UTN FRT 2026
+### Midterm Assessment Presentation – Fundamentals of Data Engineering – UTN FRT 2026
 
-**Docente:** Dr. Pedro Bernabé Araujo
+**Instructor:** Dr. Pedro Bernabé Araujo
 
-**Integrantes:** Bernabe Diaz Alvillos y Franco Nahuel Herrera
+**Team Members:** Bernabe Diaz Alvillos and Franco Nahuel Herrera
 
 A reproducible batch **ELT** pipeline for the NYC TLC yellow taxi trip records. It ingests,
 validates, cleans and models two months (the assigned month and the same month of the previous
