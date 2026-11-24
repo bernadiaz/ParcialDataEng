@@ -80,7 +80,7 @@ install: ## create .venv and install dependencies (Python 3.12+ found automatica
 
 $(VENV): pyproject.toml
 	@echo "Preparing .venv (first run, or pyproject.toml changed)..."
-	@$(MAKE) --no-print-directory install
+	@"$(MAKE)" --no-print-directory install
 
 all: $(VENV) ## full pipeline for MES and its comparison month, orchestrated by Dagster (lineage at http://localhost:3003)
 	$(PY) -m src.orchestration --mes $(MES)
@@ -151,7 +151,7 @@ explore: ## distance / speed exploration behind the R03 and R09 thresholds
 
 demo-idempotency: ## run the whole pipeline again and show that no count changes
 	$(PY) -m src.demos counts --label before
-	$(MAKE) all MES=$(MES)
+	"$(MAKE)" all MES=$(MES)
 	$(PY) -m src.demos counts --label after --compare before
 
 show-quarantine: ## one quarantined row per violated rule (MES)
