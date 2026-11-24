@@ -1,6 +1,9 @@
 """Superset settings for the NYC Taxi dashboards (secrets come from the environment / .env)."""
 import os
 import warnings
+from datetime import timedelta
+
+JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=4)
 
 SECRET_KEY = os.environ["SUPERSET_SECRET_KEY"]
 SQLALCHEMY_DATABASE_URI = "sqlite:////app/superset_home/superset.db"
