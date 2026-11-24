@@ -2,7 +2,7 @@
 
 > En abril 2026 los taxis amarillos hicieron 3.674.624 viajes válidos, −2,7 % que en abril 2025 (3.776.409), con una recaudación de US$ 110,6 M (+6,1 %).
 
-**Respaldo en Superset:** [E0.1 Viajes válidos del mes][E0.1] · [E0.2 Viajes válidos, mismo mes del año anterior][E0.2] · [E0.3 Variación de viajes (%)][E0.3] · [E0.4 Recaudación del mes (USD)][E0.4] · [E0.6 Variación de la recaudación (%)][E0.6]
+**Respaldo en Superset:** [E0.1 Viajes válidos][E0.1] · [E0.2 Viajes, año anterior][E0.2] · [E0.3 Variación de viajes (%)][E0.3] · [E0.4 Recaudación (USD)][E0.4] · [E0.6 Recaudación, cambio (%)][E0.6]
 
 | | |
 |---|---|
@@ -12,7 +12,7 @@
 | Archivos de la TLC | `yellow_tripdata_2026-04.parquet` y `yellow_tripdata_2025-04.parquet` |
 | Tablero de respaldo | [`respaldo-local-2026-04`](http://localhost:8090/superset/dashboard/respaldo-local-2026-04/) en Superset |
 | Los 12 meses del año | [`respaldo-local-2026`](http://localhost:8090/superset/dashboard/respaldo-local-2026/) en Superset |
-| Corrida | `20261124T015350Z-fa7da8`, 2026-11-24 01:53 UTC |
+| Corrida | `20261124T025639Z-7e1080`, 2026-11-24 02:56 UTC |
 
 Las interpretaciones no son texto fijo: `src/interpretacion.py` las redacta en cada corrida a partir de los resultados de las consultas, de las consultas de contexto (`sql/contexto/`) y de los reportes de esquema y de calidad de cada archivo. Los montos están en dólares; las tarifas mayores a US$ 500 se señalan como atípicas porque ninguna regla de calidad les pone un tope. Cada bloque termina con los charts de Superset que muestran sus cifras; la última sección dice cómo se comprobó.
 
@@ -146,11 +146,11 @@ order by year desc
 | 2026 | 4 | 5 | 31.310 | 36,04 |
 | 2025 | 4 | 5 | 28.320 | 32,73 |
 
-**Respaldo en Superset:** [E2.1 Las 24 horas: volumen, ingreso por viaje, aeropuertos, distancia y atípicos][E2.1]
+**Respaldo en Superset:** [E2.1 Las 24 horas: viajes e ingreso promedio por viaje][E2.1]
 
 **Interpretación:** La hora con mayor ingreso promedio por viaje es las 5:00 en los dos años: US$ 36,04 en 2026 y US$ 32,73 en 2025. Es una hora de poco volumen (31.310 viajes, contra 237.020 a las 18:00, la hora pico de demanda en ambos años). Gana porque a esa hora pesan los viajes largos: el 14,6 % de sus viajes toca JFK o LaGuardia (contra 8,0 % en todo el mes) y la distancia media es de 6,09 millas (contra 3,52). En 2026 la distancia media sube (de 5,75 a 6,09 millas), por eso el ingreso por viaje sube un 10,1 %, aunque los viajes de aeropuerto son menos (del 18,0 % al 14,6 % de los viajes de las 5:00).
 
-**Respaldo en Superset:** [E2.1 Las 24 horas: volumen, ingreso por viaje, aeropuertos, distancia y atípicos][E2.1] · [E2.5 Hora de mayor ingreso, hora pico y referencias del mes][E2.5]
+**Respaldo en Superset:** [E2.1 Las 24 horas: viajes e ingreso promedio por viaje][E2.1] · [E2.5 Hora de mayor ingreso, hora pico y referencias del mes][E2.5] · [E2.6 Las 24 horas: viajes de aeropuerto y distancia media][E2.6] · [E2.7 Las 24 horas: ingreso por viaje sin tarifas atípicas y tarifa máxima][E2.7]
 
 ## 3. Proporción de viajes con cbd_congestion_fee > 0 en el mes asignado y las 5 zonas de pickup con mayor proporción
 
@@ -266,11 +266,11 @@ order by year desc, payment_type
 | 2025 | 4 | 3 | No charge | 14.509 | 0,02 | 0,01 |
 | 2025 | 4 | 4 | Dispute | 47.550 | 0,05 | 0,04 |
 
-**Respaldo en Superset:** [E4.1 Propina como % de la tarifa, por forma de pago][E4.1]
+**Respaldo en Superset:** [E4.1 Propina como % de la tarifa, por forma de pago][E4.1] · [E4.5 Viajes con tarifa mayor a cero y cuántos dejan propina][E4.5]
 
 **Interpretación:** Con tarjeta de crédito la propina baja: 24,99 % de la tarifa en 2026 frente a 25,94 % en 2025 (21,1 % y 22,6 % ponderada), y deja propina el 90 % de esos viajes. En efectivo da casi 0 % porque la TLC no registra las propinas en efectivo, no porque no se dejen. También pesa Flex Fare (payment_type 0, tarifa fija acordada por app), que pasa del 18,4 % al 20,1 % de los viajes (591.396 → 738.979 con tarifa > 0) y cuya propina se mantiene en torno al 2,0 %. Esos viajes llegan sin passenger_count, y por eso las advertencias de la regla R05 suben del 19,4 % al 21,2 % de las filas leídas. "No charge" y "Dispute" tienen una propina cercana a 0, como es esperable.
 
-**Respaldo en Superset:** [E4.1 Propina como % de la tarifa, por forma de pago][E4.1] · [E4.4 Regla R05: viajes sin cantidad de pasajeros][E4.4]
+**Respaldo en Superset:** [E4.1 Propina como % de la tarifa, por forma de pago][E4.1] · [E4.5 Viajes con tarifa mayor a cero y cuántos dejan propina][E4.5] · [E4.6 Viajes y peso de cada forma de pago][E4.6] · [E4.4 Regla R05: viajes sin cantidad de pasajeros][E4.4]
 
 ## 5. Viajes que empiezan o terminan en JFK o LaGuardia y su tarifa promedio
 
@@ -367,7 +367,7 @@ inner join by_month as c on a.year = ${YEAR} and c.year = ${CMP_YEAR}
 - El viaje promedio es más largo (3,52 contra 3,37 millas) y más caro sin contar las tarifas mayores a US$ 500 (mediana US$ 13,50 → US$ 15,60). La propina con tarjeta baja (25,9 % → 25,0 %).
   - _Respaldo:_ [C3.1 Perfil del viaje: distancia, tarifa, mezcla y propina][C3.1]
 - Hay 33 viajes con tarifas mayores a US$ 500 (el mayor, de US$ 980,00, en 2026) pero no cambian ninguna lectura: los promedios con y sin ellos cuentan la misma historia. Igual conviene agregar una regla de calidad con un tope de tarifa o de tarifa por milla.
-  - _Respaldo:_ [C4.1 Peso de las tarifas atípicas en los promedios][C4.1] · [C4.2 Los viajes con las tarifas más altas][C4.2] · [E2.1 Las 24 horas: volumen, ingreso por viaje, aeropuertos, distancia y atípicos][E2.1]
+  - _Respaldo:_ [C4.1 Peso de las tarifas atípicas en los promedios][C4.1] · [C4.2 Los viajes con las tarifas más altas][C4.2] · [E2.7 Las 24 horas: ingreso por viaje sin tarifas atípicas y tarifa máxima][E2.7]
 - Los dos archivos respetan el contrato de esquema. La cuarentena es del 4,09 % y del 4,89 % de las filas leídas y los dos meses reconcilian. Las cifras salen de los marts de dbt en DuckDB (modo local) y se reproducen con `make all MES=2026-04 INGEST_MODE=direct WAREHOUSE=duckdb`.
   - _Respaldo:_ [C5.1 Cuarentena y reconciliación][C5.1] · [C5.2 Cambios de formato de los archivos][C5.2]
 
@@ -378,20 +378,20 @@ Todas las cifras salen de las tablas `marts.ev_*` (modelos dbt de `dbt_taxi/mode
 **Auditoría de las cifras:** 315 números en este reporte, 315 se ven en los charts que cita su bloque y 0 no. Las respuestas de `sql/q1..q6` coinciden con la evidencia.
 
 <!-- VERIFICACION:START - la escribe src/respaldo.py al comparar el reporte con Superset; no editar a mano -->
-**Verificación contra Superset:** coincide (2026-11-24 02:23 UTC, corrida `20261124T022142Z-3c2cd6`).
+**Verificación contra Superset:** coincide (2026-11-24 03:06 UTC, corrida `20261124T030441Z-aada0b`).
 
-- Tablero `respaldo-local-2026-04`: 54 de 54 charts devolvieron por la API exactamente los datos de este reporte (4.664 celdas comparadas).
+- Tablero `respaldo-local-2026-04`: 58 de 58 charts devolvieron por la API exactamente los datos de este reporte (4.780 celdas comparadas).
 - Tablero `respaldo-local-2026`: 17 de 17 charts (4.587 celdas).
 - Números de este reporte: 315 de 315 se ven en los charts que cita su bloque.
 <!-- VERIFICACION:END -->
 
 | chart | qué sustenta | tabla | dónde se cita |
 |---|---|---|---|
-| [E0.1 Viajes válidos del mes][E0.1] | viajes válidos del mes | `marts.ev_indicadores` | Resumen |
-| [E0.2 Viajes válidos, mismo mes del año anterior][E0.2] | viajes válidos del mes de comparación | `marts.ev_indicadores` | Resumen |
+| [E0.1 Viajes válidos][E0.1] | viajes válidos del mes | `marts.ev_indicadores` | Resumen |
+| [E0.2 Viajes, año anterior][E0.2] | viajes válidos del mes de comparación | `marts.ev_indicadores` | Resumen |
 | [E0.3 Variación de viajes (%)][E0.3] | variación interanual de los viajes | `marts.ev_indicadores` | Resumen |
-| [E0.4 Recaudación del mes (USD)][E0.4] | recaudación total del mes | `marts.ev_indicadores` | Resumen |
-| [E0.6 Variación de la recaudación (%)][E0.6] | variación interanual de la recaudación | `marts.ev_indicadores` | Resumen |
+| [E0.4 Recaudación (USD)][E0.4] | recaudación total del mes | `marts.ev_indicadores` | Resumen |
+| [E0.6 Recaudación, cambio (%)][E0.6] | variación interanual de la recaudación | `marts.ev_indicadores` | Resumen |
 | [EC.1 Reconciliación: leídas = aceptadas + cuarentena][EC.1] | filas leídas, aceptadas, en cuarentena y con advertencias de cada archivo | `marts.ev_calidad` | Calidad, Pregunta 6 |
 | [EC.2 Filas que violan cada regla de calidad][EC.2] | filas y porcentaje por regla en los dos meses | `marts.ev_reglas` | Calidad, Pregunta 6 |
 | [EC.4 Contrato de esquema: novedades de cada archivo][EC.4] | qué trajo cada parquet respecto del contrato y qué se hizo | `marts.ev_esquema` | Calidad |
@@ -400,13 +400,17 @@ Todas las cifras salen de las tablas `marts.ev_*` (modelos dbt de `dbt_taxi/mode
 | [E1.4 Concentración y composición del top 10][E1.4] | peso del top 10, zonas en Manhattan, zonas que crecen o caen y total de la ciudad | `marts.ev_indicadores` | Pregunta 1 |
 | [E1.5 Pickups en JFK y LaGuardia][E1.5] | puesto y variación de los dos aeropuertos | `marts.ev_zonas` | Pregunta 1 |
 | [E1.6 Pickups por borough][E1.6] | peso y variación de cada borough | `marts.ev_boroughs` | Pregunta 1 |
-| [E2.1 Las 24 horas: volumen, ingreso por viaje, aeropuertos, distancia y atípicos][E2.1] | respuesta de la pregunta 2 y sus causas, hora por hora | `marts.ev_horas` | Pregunta 2, Conclusiones |
+| [E2.1 Las 24 horas: viajes e ingreso promedio por viaje][E2.1] | respuesta de la pregunta 2: volumen, ingreso por viaje y puesto de cada hora | `marts.ev_horas` | Pregunta 2 |
 | [E2.5 Hora de mayor ingreso, hora pico y referencias del mes][E2.5] | resumen de la pregunta 2 | `marts.ev_indicadores` | Pregunta 2 |
+| [E2.6 Las 24 horas: viajes de aeropuerto y distancia media][E2.6] | por qué gana una hora: peso de los aeropuertos y distancia | `marts.ev_horas` | Pregunta 2 |
+| [E2.7 Las 24 horas: ingreso por viaje sin tarifas atípicas y tarifa máxima][E2.7] | si un puesto del ranking lo infla un solo viaje | `marts.ev_horas` | Pregunta 2, Conclusiones |
 | [E3.1 Peaje CBD: proporción de viajes, cobro y efecto del inicio][E3.1] | respuesta de la pregunta 3 (total del mes) y el efecto de la fecha de inicio | `marts.ev_indicadores` | Pregunta 3 |
 | [E3.3 Las 5 zonas con mayor proporción de viajes con peaje][E3.3] | respuesta de la pregunta 3 (zonas con 1.000 viajes o más) | `marts.ev_cbd_zonas` | Pregunta 3 |
 | [E3.2 Proporción diaria de viajes con peaje (%)][E3.2] | cuándo empieza el cobro | `marts.ev_dias` | Pregunta 3 |
 | [E3.5 Regla R10: cobros anómalos del peaje][E3.5] | filas marcadas por la regla R10 | `marts.ev_reglas` | Pregunta 3 |
-| [E4.1 Propina como % de la tarifa, por forma de pago][E4.1] | respuesta de la pregunta 4 y peso de cada forma de pago | `marts.ev_pagos` | Pregunta 4 |
+| [E4.1 Propina como % de la tarifa, por forma de pago][E4.1] | respuesta de la pregunta 4: propina media y ponderada | `marts.ev_pagos` | Pregunta 4 |
+| [E4.5 Viajes con tarifa mayor a cero y cuántos dejan propina][E4.5] | la base de la propina de la pregunta 4 | `marts.ev_pagos` | Pregunta 4 |
+| [E4.6 Viajes y peso de cada forma de pago][E4.6] | cuánto pesa cada forma de pago en los viajes | `marts.ev_pagos` | Pregunta 4 |
 | [E4.4 Regla R05: viajes sin cantidad de pasajeros][E4.4] | advertencias por passenger_count | `marts.ev_reglas` | Pregunta 4 |
 | [E5.1 Viajes y tarifas de los aeropuertos][E5.1] | respuesta de la pregunta 5 | `marts.ev_indicadores` | Pregunta 5 |
 | [E5.4 Las tarifas más altas de cada mes (mayores a US$ 500)][E5.4] | los viajes atípicos, con su recorrido y forma de pago | `marts.ev_tarifas_altas` | Pregunta 5, Pregunta 6 |
@@ -424,7 +428,7 @@ Todas las cifras salen de las tablas `marts.ev_*` (modelos dbt de `dbt_taxi/mode
 | [C5.1 Cuarentena y reconciliación][C5.1] | conclusión 5, calidad | `marts.ev_calidad` | Conclusiones |
 | [C5.2 Cambios de formato de los archivos][C5.2] | conclusión 5, esquema | `marts.ev_esquema` | Conclusiones |
 
-Charts de apoyo visual del mismo tablero (mismas tablas): [E0.5 Recaudación, mismo mes del año anterior (USD)][E0.5], [E0.7 Viajes por día del mes][E0.7], [E0.8 Recaudación por día del mes (USD)][E0.8], [EC.3 Porcentaje de las filas leídas que viola cada regla][EC.3], [E1.2 Viajes del top 10, los dos meses][E1.2], [E1.7 Variación de pickups por borough (%)][E1.7], [E1.8 Todas las zonas y su variación][E1.8], [E2.2 Ingreso promedio por viaje según la hora (USD)][E2.2], [E2.3 Viajes según la hora][E2.3], [E2.4 Viajes de aeropuerto según la hora (%)][E2.4], [E3.4 Las 15 zonas con mayor proporción de viajes con peaje (%)][E3.4], [E4.2 Participación de cada forma de pago (%)][E4.2], [E4.3 Propina media por forma de pago (% de la tarifa)][E4.3], [E5.2 Viajes que tocan cada aeropuerto][E5.2], [E5.3 Tarifa de los viajes de aeropuerto (USD)][E5.3], [E6.3 Viajes por día, según el día de la semana][E6.3], [E6.4 Variación de los viajes por día (%)][E6.4], [E6.6 Tarifa media, media sin atípicas y mediana (USD)][E6.6].
+Charts de apoyo visual del mismo tablero (mismas tablas): [E0.5 Recaudación, año anterior][E0.5], [E0.7 Viajes por día del mes][E0.7], [E0.8 Recaudación por día del mes (USD)][E0.8], [EC.3 Porcentaje de las filas leídas que viola cada regla][EC.3], [E1.2 Viajes del top 10, los dos meses][E1.2], [E1.7 Variación de pickups por borough (%)][E1.7], [E1.8 Todas las zonas y su variación][E1.8], [E2.2 Ingreso promedio por viaje según la hora (USD)][E2.2], [E2.3 Viajes según la hora][E2.3], [E2.4 Viajes de aeropuerto según la hora (%)][E2.4], [E3.4 Las 15 zonas con mayor proporción de viajes con peaje (%)][E3.4], [E4.2 Participación de cada forma de pago (%)][E4.2], [E4.3 Propina media por forma de pago (% de la tarifa)][E4.3], [E5.2 Viajes que tocan cada aeropuerto][E5.2], [E5.3 Tarifa de los viajes de aeropuerto (USD)][E5.3], [E6.3 Viajes por día, según el día de la semana][E6.3], [E6.4 Variación de los viajes por día (%)][E6.4], [E6.6 Tarifa media, media sin atípicas y mediana (USD)][E6.6].
 
 <details><summary>Cada cifra y el chart donde se ve</summary>
 
@@ -565,28 +569,28 @@ Cuando un número redondeado aparece en más de una celda se indica cuántas.
 | Pregunta 1 | 28.212 | E1.6 | `viajes_anterior` · Bronx |
 | Pregunta 1 | 34.866 | E1.6 | `viajes_mes` · Bronx |
 | Pregunta 1 | −2,7 | E1.4 | `variacion_pct` · Pickups de todas las zonas |
-| Pregunta 2 | 5 | E2.1 | `distancia_media_mes` · 4:00 (y 9 más) |
+| Pregunta 2 | 5 | E2.1 | `hora` · 5:00 (y 4 más) |
 | Pregunta 2 | 31.310 | E2.1 | `viajes_mes` · 5:00 |
-| Pregunta 2 | 36,04 | E2.1 | `ingreso_viaje_mes` · 5:00 (y 1 más) |
-| Pregunta 2 | 5 | E2.1 | `distancia_media_mes` · 4:00 (y 9 más) |
+| Pregunta 2 | 36,04 | E2.1 | `ingreso_viaje_mes` · 5:00 |
+| Pregunta 2 | 5 | E2.1 | `hora` · 5:00 (y 4 más) |
 | Pregunta 2 | 28.320 | E2.1 | `viajes_anterior` · 5:00 |
-| Pregunta 2 | 32,73 | E2.1 | `ingreso_viaje_anterior` · 5:00 (y 1 más) |
-| Pregunta 2 | 5:00 | E2.1 | `distancia_media_mes` · 4:00 (y 12 más) |
-| Pregunta 2 | 18:00 | E2.1 | `variacion_ingreso_pct` · 0:00 (y 6 más) |
-| Pregunta 2 | 5:00 | E2.1 | `distancia_media_mes` · 4:00 (y 12 más) |
-| Pregunta 2 | 36,04 | E2.1 | `ingreso_viaje_mes` · 5:00 (y 2 más) |
-| Pregunta 2 | 32,73 | E2.1 | `ingreso_viaje_anterior` · 5:00 (y 2 más) |
+| Pregunta 2 | 32,73 | E2.1 | `ingreso_viaje_anterior` · 5:00 |
+| Pregunta 2 | 5:00 | E2.1 | `hora` · 5:00 (y 14 más) |
+| Pregunta 2 | 18:00 | E2.1 | `variacion_ingreso_pct` · 0:00 (y 8 más) |
+| Pregunta 2 | 5:00 | E2.1 | `hora` · 5:00 (y 14 más) |
+| Pregunta 2 | 36,04 | E2.1 | `ingreso_viaje_mes` · 5:00 (y 3 más) |
+| Pregunta 2 | 32,73 | E2.1 | `ingreso_viaje_anterior` · 5:00 (y 3 más) |
 | Pregunta 2 | 31.310 | E2.1 | `viajes_mes` · 5:00 (y 1 más) |
 | Pregunta 2 | 237.020 | E2.1 | `viajes_mes` · 18:00 (y 1 más) |
-| Pregunta 2 | 14,6 | E2.1 | `pct_aeropuerto_mes` · 5:00 |
-| Pregunta 2 | 8,0 | E2.1 | `hora` · 8:00 (y 3 más) |
-| Pregunta 2 | 6,09 | E2.1 | `distancia_media_mes` · 5:00 |
+| Pregunta 2 | 14,6 | E2.6 | `pct_aeropuerto_mes` · 5:00 |
+| Pregunta 2 | 8,0 | E2.1 | `hora` · 8:00 (y 5 más) |
+| Pregunta 2 | 6,09 | E2.6 | `distancia_media_mes` · 5:00 |
 | Pregunta 2 | 3,52 | E2.5 | `valor_mes` · Distancia media |
-| Pregunta 2 | 5,75 | E2.1 | `distancia_media_anterior` · 5:00 |
-| Pregunta 2 | 6,09 | E2.1 | `distancia_media_mes` · 5:00 |
+| Pregunta 2 | 5,75 | E2.6 | `distancia_media_anterior` · 5:00 |
+| Pregunta 2 | 6,09 | E2.6 | `distancia_media_mes` · 5:00 |
 | Pregunta 2 | 10,1 | E2.1 | `variacion_ingreso_pct` · 5:00 (y 1 más) |
-| Pregunta 2 | 18,0 | E2.1 | `pct_aeropuerto_anterior` · 5:00 (y 5 más) |
-| Pregunta 2 | 14,6 | E2.1 | `pct_aeropuerto_mes` · 5:00 |
+| Pregunta 2 | 18,0 | E2.1 | `puesto_anterior` · 10:00 (y 7 más) |
+| Pregunta 2 | 14,6 | E2.6 | `pct_aeropuerto_mes` · 5:00 |
 | Pregunta 3 | 3.674.624 | E3.1 | `valor_mes` · Viajes válidos (y 1 más) |
 | Pregunta 3 | 2.636.125 | E3.1 | `valor_mes` · Viajes con cbd_congestion_fee > 0 |
 | Pregunta 3 | 71,74 | E3.1 | `valor_mes` · Proporción de viajes con cbd_congestion_fee > 0 |
@@ -613,54 +617,54 @@ Cuando un número redondeado aparece en más de una celda se indica cuántas.
 | Pregunta 3 | 73,95 | E3.1 | `valor_anterior` · Proporción de viajes con cbd_congestion_fee > 0 |
 | Pregunta 3 | −2,2 | E3.1 | `variacion` · Proporción de viajes con cbd_congestion_fee > 0 |
 | Pregunta 3 | 9.706 | E3.5 | `filas_mes` · R10 |
-| Pregunta 4 | 738.979 | E4.1 | `viajes_tarifa_positiva_mes` · Flex Fare |
+| Pregunta 4 | 738.979 | E4.5 | `viajes_tarifa_positiva_mes` · Flex Fare |
 | Pregunta 4 | 2,03 | E4.1 | `propina_media_pct_mes` · Flex Fare |
 | Pregunta 4 | 1,76 | E4.1 | `propina_ponderada_pct_mes` · Flex Fare |
 | Pregunta 4 | 1 | E4.1 | `payment_type` · Credit card (y 1 más) |
-| Pregunta 4 | 2.572.405 | E4.1 | `viajes_tarifa_positiva_mes` · Credit card |
+| Pregunta 4 | 2.572.405 | E4.5 | `viajes_tarifa_positiva_mes` · Credit card |
 | Pregunta 4 | 24,99 | E4.1 | `propina_media_pct_mes` · Credit card |
 | Pregunta 4 | 21,05 | E4.1 | `propina_ponderada_pct_mes` · Credit card |
-| Pregunta 4 | 2 | E4.1 | `propina_media_pct_mes` · Flex Fare (y 4 más) |
-| Pregunta 4 | 342.739 | E4.1 | `viajes_tarifa_positiva_mes` · Cash |
-| Pregunta 4 | 0,00 | E4.1 | `payment_type` · Flex Fare (y 8 más) |
-| Pregunta 4 | 0,00 | E4.1 | `payment_type` · Flex Fare (y 8 más) |
-| Pregunta 4 | 3 | E4.1 | `payment_type` · No charge |
-| Pregunta 4 | 7.048 | E4.1 | `viajes_tarifa_positiva_mes` · No charge |
-| Pregunta 4 | 0,00 | E4.1 | `payment_type` · Flex Fare (y 8 más) |
-| Pregunta 4 | 0,00 | E4.1 | `payment_type` · Flex Fare (y 8 más) |
-| Pregunta 4 | 4 | E4.1 | `payment_type` · Dispute |
-| Pregunta 4 | 11.486 | E4.1 | `viajes_tarifa_positiva_mes` · Dispute |
-| Pregunta 4 | 0,01 | E4.1 | `pct_con_propina_mes` · Cash (y 3 más) |
-| Pregunta 4 | 0,00 | E4.1 | `payment_type` · Flex Fare (y 8 más) |
-| Pregunta 4 | 591.396 | E4.1 | `viajes_tarifa_positiva_anterior` · Flex Fare |
+| Pregunta 4 | 2 | E4.1 | `propina_media_pct_mes` · Flex Fare (y 5 más) |
+| Pregunta 4 | 342.739 | E4.5 | `viajes_tarifa_positiva_mes` · Cash |
+| Pregunta 4 | 0,00 | E4.1 | `payment_type` · Flex Fare (y 9 más) |
+| Pregunta 4 | 0,00 | E4.1 | `payment_type` · Flex Fare (y 9 más) |
+| Pregunta 4 | 3 | E4.1 | `payment_type` · No charge (y 1 más) |
+| Pregunta 4 | 7.048 | E4.5 | `viajes_tarifa_positiva_mes` · No charge |
+| Pregunta 4 | 0,00 | E4.1 | `payment_type` · Flex Fare (y 9 más) |
+| Pregunta 4 | 0,00 | E4.1 | `payment_type` · Flex Fare (y 9 más) |
+| Pregunta 4 | 4 | E4.1 | `payment_type` · Dispute (y 1 más) |
+| Pregunta 4 | 11.486 | E4.5 | `viajes_tarifa_positiva_mes` · Dispute |
+| Pregunta 4 | 0,01 | E4.1 | `propina_ponderada_pct_anterior` · No charge (y 3 más) |
+| Pregunta 4 | 0,00 | E4.1 | `payment_type` · Flex Fare (y 9 más) |
+| Pregunta 4 | 591.396 | E4.5 | `viajes_tarifa_positiva_anterior` · Flex Fare |
 | Pregunta 4 | 2,04 | E4.1 | `propina_media_pct_anterior` · Flex Fare |
 | Pregunta 4 | 2,10 | E4.1 | `propina_ponderada_pct_anterior` · Flex Fare |
 | Pregunta 4 | 1 | E4.1 | `payment_type` · Credit card (y 1 más) |
-| Pregunta 4 | 2.635.152 | E4.1 | `viajes_tarifa_positiva_anterior` · Credit card |
+| Pregunta 4 | 2.635.152 | E4.5 | `viajes_tarifa_positiva_anterior` · Credit card |
 | Pregunta 4 | 25,94 | E4.1 | `propina_media_pct_anterior` · Credit card |
 | Pregunta 4 | 22,58 | E4.1 | `propina_ponderada_pct_anterior` · Credit card |
-| Pregunta 4 | 2 | E4.1 | `propina_media_pct_mes` · Flex Fare (y 4 más) |
-| Pregunta 4 | 382.522 | E4.1 | `viajes_tarifa_positiva_anterior` · Cash |
-| Pregunta 4 | 0,00 | E4.1 | `payment_type` · Flex Fare (y 8 más) |
-| Pregunta 4 | 0,00 | E4.1 | `payment_type` · Flex Fare (y 8 más) |
-| Pregunta 4 | 3 | E4.1 | `payment_type` · No charge |
-| Pregunta 4 | 14.509 | E4.1 | `viajes_tarifa_positiva_anterior` · No charge |
+| Pregunta 4 | 2 | E4.1 | `propina_media_pct_mes` · Flex Fare (y 5 más) |
+| Pregunta 4 | 382.522 | E4.5 | `viajes_tarifa_positiva_anterior` · Cash |
+| Pregunta 4 | 0,00 | E4.1 | `payment_type` · Flex Fare (y 9 más) |
+| Pregunta 4 | 0,00 | E4.1 | `payment_type` · Flex Fare (y 9 más) |
+| Pregunta 4 | 3 | E4.1 | `payment_type` · No charge (y 1 más) |
+| Pregunta 4 | 14.509 | E4.5 | `viajes_tarifa_positiva_anterior` · No charge |
 | Pregunta 4 | 0,02 | E4.1 | `propina_media_pct_anterior` · No charge (y 1 más) |
-| Pregunta 4 | 0,01 | E4.1 | `pct_con_propina_mes` · Cash (y 3 más) |
-| Pregunta 4 | 4 | E4.1 | `payment_type` · Dispute |
-| Pregunta 4 | 47.550 | E4.1 | `viajes_tarifa_positiva_anterior` · Dispute |
+| Pregunta 4 | 0,01 | E4.1 | `propina_ponderada_pct_anterior` · No charge (y 3 más) |
+| Pregunta 4 | 4 | E4.1 | `payment_type` · Dispute (y 1 más) |
+| Pregunta 4 | 47.550 | E4.5 | `viajes_tarifa_positiva_anterior` · Dispute |
 | Pregunta 4 | 0,05 | E4.1 | `propina_media_pct_anterior` · Dispute |
-| Pregunta 4 | 0,04 | E4.1 | `pct_con_propina_anterior` · No charge (y 1 más) |
+| Pregunta 4 | 0,04 | E4.1 | `propina_ponderada_pct_anterior` · Dispute (y 1 más) |
 | Pregunta 4 | 24,99 | E4.1 | `propina_media_pct_mes` · Credit card |
 | Pregunta 4 | 25,94 | E4.1 | `propina_media_pct_anterior` · Credit card |
 | Pregunta 4 | 21,1 | E4.1 | `propina_ponderada_pct_mes` · Credit card |
 | Pregunta 4 | 22,6 | E4.1 | `propina_ponderada_pct_anterior` · Credit card |
-| Pregunta 4 | 90 | E4.1 | `pct_con_propina_mes` · Credit card |
-| Pregunta 4 | 18,4 | E4.1 | `participacion_anterior_pct` · Flex Fare |
-| Pregunta 4 | 20,1 | E4.1 | `participacion_mes_pct` · Flex Fare |
-| Pregunta 4 | 591.396 | E4.1 | `viajes_tarifa_positiva_anterior` · Flex Fare |
-| Pregunta 4 | 738.979 | E4.1 | `viajes_tarifa_positiva_mes` · Flex Fare |
-| Pregunta 4 | 2,0 | E4.1 | `propina_media_pct_mes` · Flex Fare (y 2 más) |
+| Pregunta 4 | 90 | E4.5 | `pct_con_propina_mes` · Credit card |
+| Pregunta 4 | 18,4 | E4.6 | `participacion_anterior_pct` · Flex Fare |
+| Pregunta 4 | 20,1 | E4.6 | `participacion_mes_pct` · Flex Fare |
+| Pregunta 4 | 591.396 | E4.5 | `viajes_tarifa_positiva_anterior` · Flex Fare |
+| Pregunta 4 | 738.979 | E4.5 | `viajes_tarifa_positiva_mes` · Flex Fare |
+| Pregunta 4 | 2,0 | E4.1 | `propina_media_pct_mes` · Flex Fare (y 4 más) |
 | Pregunta 4 | 19,4 | E4.4 | `pct_anterior` · R05 |
 | Pregunta 4 | 21,2 | E4.4 | `pct_mes` · R05 |
 | Pregunta 5 | 292.622 | E5.1 | `valor_mes` · Viajes que tocan JFK o LaGuardia |
@@ -775,12 +779,16 @@ Cuando un número redondeado aparece en más de una celda se indica cuántas.
 [E2.3]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E2-3
 [E2.4]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E2-4
 [E2.5]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E2-5
+[E2.6]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E2-6
+[E2.7]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E2-7
 [E3.1]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E3-1
 [E3.5]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E3-5
 [E3.3]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E3-3
 [E3.4]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E3-4
 [E3.2]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E3-2
 [E4.1]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E4-1
+[E4.5]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E4-5
+[E4.6]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E4-6
 [E4.2]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E4-2
 [E4.3]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E4-3
 [E4.4]: http://localhost:8090/superset/dashboard/respaldo-local-2026-04/#CHART-E4-4
