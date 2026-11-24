@@ -239,7 +239,8 @@ docker/             pipeline-make.sh: `make` of the pipeline container (adapts .
 Dockerfile          pipeline container: Python 3.12, GNU make and requirements.txt (runs make without installing it)
 requirements.txt    every library of the pipeline, pinned to the validated versions (pip install -r requirements.txt)
 tests/              pytest: quality rules, idempotency, reconciliation, schema, reports, evidence, dashboards, two-command run
-docs/               Spanish project documentation (Documentacion_Pipeline_NYC_Taxi.docx)
+docs/               Spanish project documentation (Documentacion_Pipeline_NYC_Taxi.pdf), guide to a clean Docker
+                    restart (Guia_Reinicio_Limpio_Docker_NYC_Taxi.pdf) and the project plan (Plan_Pipeline_NYC_Taxi.md)
 docker-compose.yml  Dagster UI + its Postgres, observability and BI stack, and the pipeline container
 Makefile            the only command you need
 ```
@@ -819,14 +820,17 @@ image pinned:
 
 ## 12. Dashboards (Superset)
 
-`make all` builds the dashboards **as code** through the Superset API, as its last Dagster asset
-(`superset_dashboards`, code in `src/dashboards.py`). It waits for Superset if the stack was just
-started, and skips with a warning when the stack is not running. `make superset-dashboards
-MES=2025-01` runs the same step alone. It is idempotent: objects are matched by name and updated. It
-creates the database connection (Snowflake marts through the service user's key pair, or the
-offline DuckDB copy when `WAREHOUSE=duckdb`), 13 virtual datasets and **7 dashboards in English**.
-Each one compares the assigned month with the same month of the previous year (series colored per
-period):
+`make all` builds the dashboards **as code** through the Superset API, in its last two Dagster assets:
+`superset_dashboards` (seven dashboards on the last comparison, `src/dashboards.py`) and
+`superset_respaldo` (the [evidence dashboards](#evidence-dashboards-what-backs-every-report) that back
+every report). They wait for Superset if the stack was just started, and are skipped with a warning when
+it is not running. `make superset-dashboards MES=2025-01` runs both alone. They are idempotent: objects
+are matched by name and updated.
+
+`superset_dashboards` creates the database connection (Snowflake marts through the service user's key
+pair, or the offline DuckDB copy when `WAREHOUSE=duckdb`), 13 virtual datasets and **7 dashboards in
+English**. Each one compares the assigned month with the same month of the previous year (series colored
+per period):
 
 | Dashboard | Charts |
 |---|---|
@@ -919,10 +923,13 @@ report is out of date because the data of its months changed after it was writte
 - RAW is loaded only with the accepted rows.
 - STAGING is a **transient schema** (no Fail-safe) with views.
 - Intermediate models are **ephemeral**.
-- `fact_trips` and `agg_zone_hour` are **incremental by (year, month)**: a pre-hook deletes the
-  processed months and the run appends them, so there is never a full refresh. This also avoids
-  dbt's `delete+insert` on a non-unique key, whose many-to-many delete join would burn credits.
-- Dimensions are small tables.
+- `fact_trips`, `agg_zone_hour` and the monthly aggregates (`agg_*`, `top_fare_trips`) are **incremental by
+  (year, month)**: a pre-hook deletes the processed months and the run appends them, so there is never a
+  full refresh. This also avoids dbt's `delete+insert` on a non-unique key, whose many-to-many delete join
+  would burn credits.
+- Dimensions are small tables. The evidence tables (`ev_*`, a few thousand rows) are rebuilt from the
+  aggregates on every run and are **transient** (no Fail-safe): neither the reports nor the evidence
+  dashboards scan the trips.
 - There are no clustering keys (about 6M rows do not need them) and no `SELECT *` in the marts.
 
 **Loading:**
@@ -1094,6 +1101,7 @@ docker compose up -d && make all MES=2025-01   # 1. full pipeline (Dagster UI: h
 make demo-idempotency MES=2025-01          # 2. run again: every count unchanged, raw skipped by hash
 make quality-report MES=2025-01            # 3. quality report
 make show-quarantine MES=2025-01           #    one quarantined row per rule, with its source row
+make verify-results MES=2025-01            # 4. every report and dashboard of the year against what Superset returns
 ```
 
 Item 3 is also on screen in Superset: *Data Quality & Quarantine* shows the quarantined rows with
@@ -1102,7 +1110,10 @@ their violated rules, and Dagster shows `raw/yellow_quarantine` with its rows pe
 Then show:
 - **Grafana:** *Data Quality* and *Pipeline Health & Logs*.
 - **Dozzle:** live container logs.
-- **Superset:** the 6 business dashboards and *Data Quality & Quarantine*.
+- **Superset:** the 6 business dashboards and *Data Quality & Quarantine*; then
+  [`respaldo-local-2025-01`](http://localhost:8090/superset/dashboard/respaldo-local-2025-01/), from a link of
+  `results/2025/RESULTS_01.md` (each conclusion is next to the charts that back it), and
+  [`respaldo-local-2025`](http://localhost:8090/superset/dashboard/respaldo-local-2025/), the 12 months of the year.
 - **Snowflake:** `RAW.LOAD_LOG`, one row per load with the rows replaced and loaded.
 
 ---
@@ -1156,7 +1167,7 @@ We used AI assistants in this project, and we want to be clear about how:
 
 - **Claude Code (Anthropic)** generated one part of the code in this repository from our project plan
   and the exam statement. It also profiled
-  the the files to propose the quality thresholds.
+  the files to propose the quality thresholds.
 - **Cursor** helped us write the project plan (`Plan_Pipeline_NYC_Taxi`).
 
 That does not mean Claude built the project on its own while we watched. The plan and the main
