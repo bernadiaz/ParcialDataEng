@@ -42,3 +42,5 @@ packages = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Notice of a library that dagster-dbt imports; it says nothing about this project.
+filterwarnings = ["ignore:sqlglotrs is deprecated:DeprecationWarning"]

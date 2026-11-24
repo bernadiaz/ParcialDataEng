@@ -1,4 +1,4 @@
--- Contexto 10 (respaldo): filas en cuarentena por regla de rechazo y año (marts.agg_quarantine_rule).
-select year, rule_id, quarantined_rows
-from marts.agg_quarantine_rule
-where month = ${MONTH} and year in (${YEAR}, ${CMP_YEAR})
+-- Contexto 10: filas que violan cada regla de calidad en los dos meses (marts.ev_reglas, la tabla de Superset).
+select *
+from marts.ev_reglas
+where mes = '${MES}'

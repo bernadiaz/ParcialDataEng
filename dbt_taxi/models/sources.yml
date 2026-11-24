@@ -34,5 +34,17 @@ sources:
             data_tests: [not_null]
           - name: source_row_number
             data_tests: [not_null]
+      - name: quality_summary
+        description: >
+          Quality gate of each month, as reported by the run that loaded it (control database): rows in the
+          file, read, accepted, quarantined and accepted with warnings. Each (year, month) is replaced as a whole.
+      - name: quality_rules
+        description: >
+          Rows violating each quality rule in each month (rejects and warnings), with the Spanish description of
+          contracts/quality_rules.yaml.
+      - name: schema_findings
+        description: >
+          What each file brought compared with contracts/yellow_schema.yaml, one row per finding. A file that
+          matches the contract has a single row with finding = 'none'.
       - name: load_log
         description: One row per load (rows deleted, rows loaded, file SHA-256). Used in the oral defense.

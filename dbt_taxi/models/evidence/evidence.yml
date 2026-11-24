@@ -1,0 +1,81 @@
+version: 2
+
+# Evidence of the Spanish reports (results/YYYY/RESULTS_MM.md) and of the Superset evidence dashboards: both
+# read these tables, so a figure of a report and its chart are the same stored value. Every table has `mes`
+# (YYYY-MM, the month of the comparison), `anio` and `mes_num`.
+models:
+  - name: ev_comparaciones
+    description: "Grain: one row per comparison, a month whose same month of the previous year is loaded too."
+    columns:
+      - name: mes
+        data_tests: [unique, not_null]
+
+  - name: ev_periodos
+    description: "Grain: two rows per comparison: rol 'mes' (the month) and rol 'anterior' (the same month a year before)."
+    columns:
+      - name: periodo
+        data_tests: [not_null]
+      - name: rol
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['mes', 'anterior']
+
+  - name: ev_cobertura
+    description: "Grain: one row per calendar month of every year with data (12 per year), with the state of its comparison."
+    columns:
+      - name: mes
+        data_tests: [unique, not_null]
+      - name: estado
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['comparado', 'falta el mes del año anterior', 'mes sin cargar']
+
+  - name: ev_indicadores
+    description: "Grain: one row per comparison and indicator: value of the month, of the same month a year before, change."
+    columns:
+      - name: indicador_id
+        data_tests: [not_null]
+
+  - name: ev_zonas
+    description: "Grain: one row per comparison and pickup zone (question 1 and conclusions)."
+    columns:
+      - name: viajes_mes
+        data_tests: [not_null]
+
+  - name: ev_boroughs
+    description: "Grain: one row per comparison and borough (question 1)."
+
+  - name: ev_horas
+    description: "Grain: one row per comparison and pickup hour (question 2)."
+
+  - name: ev_dias
+    description: "Grain: one row per comparison, period and day (questions 3 and 6)."
+
+  - name: ev_dias_semana
+    description: "Grain: one row per comparison and day of the week (calendar effect of question 6)."
+
+  - name: ev_cbd_zonas
+    description: "Grain: one row per comparison and pickup zone with 1,000 trips or more (question 3)."
+
+  - name: ev_pagos
+    description: "Grain: one row per comparison and payment type (question 4)."
+
+  - name: ev_tarifas_altas
+    description: "Grain: one row per comparison, period and rank: the highest fares above var('fare_cap')."
+
+  - name: ev_calidad
+    description: "Grain: two rows per comparison (one per period): the quality gate of each file."
+    columns:
+      - name: leidas
+        data_tests: [not_null]
+
+  - name: ev_reglas
+    description: "Grain: one row per comparison and quality rule, both months side by side."
+    columns:
+      - name: regla
+        data_tests: [not_null]
+
+  - name: ev_esquema
+    description: "Grain: one row per comparison, period and schema finding."

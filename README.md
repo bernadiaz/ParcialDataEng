@@ -21,7 +21,12 @@ two months. The comparison is always month against month, never a month against 
 - [`results/2026/`](results/2026): the months of **2026 the TLC has published (January to September),
   each one against the same month of 2025** (`make all MES=2026-01` → `RESULTS_01.md`, ...).
 
-Each report is interpreted from its own numbers.
+Each report is interpreted from its own numbers, and **every figure and every conclusion is backed by a
+Superset chart**: each block of a report links to the charts that show its figures, `make all` builds those
+charts (one dashboard per month, plus the 12 months of the year against the 12 of the year before), asks
+Superset for their data and writes in the report whether they match ([section 12](#12-dashboards-superset)).
+`make all-year MES=2025-01` runs the 12 months of 2025 with one command. A month that cannot be compared
+(not published yet, in the future, or without a previous year) gets a report that says so, without figures.
 
 ---
 
@@ -77,8 +82,8 @@ Those two commands are the whole run, on Windows, Linux and macOS. `make all`:
 - creates `.venv` and installs the project the first time, with the first Python 3.12+ it finds
   (`make install` is optional, and it runs again by itself when `pyproject.toml` changes);
 - runs every step through Dagster: ingestion, schema, quality, load, dbt, the six questions
-  (`results/YYYY/RESULTS_MM.md`) and the **Superset dashboards**, so no other
-  command is needed;
+  (`results/YYYY/RESULTS_MM.md`) and the **Superset dashboards**, and compares the report with what
+  Superset shows, so no other command is needed;
 - writes the Dagster run history to the Postgres of docker compose, so the lineage at
   http://localhost:3003 shows every asset green as the runs finish.
 
@@ -126,7 +131,7 @@ a quarter of the container's memory limit (`PIPELINE_MEM_LIMIT`, 4g by default).
 |---|---|---|
 | Dagster | http://localhost:3003 | asset lineage, monthly partitions, runs, reconciliation check (read only: runs start from `make all`) |
 | Grafana | http://localhost:3002 | *Pipeline Health & Logs*, *Data Quality* |
-| Superset | http://localhost:8090 | 7 dashboards in English (6 business + Data Quality & Quarantine), built by `make all` |
+| Superset | http://localhost:8090 | 7 dashboards in English (6 business + Data Quality & Quarantine) on the last comparison, and the evidence dashboards in Spanish that back every report of `results/` (one per month and one per year), all built by `make all` |
 | Dozzle | http://localhost:8081 | live container logs |
 | Prometheus | http://localhost:9090 | metrics (from the Pushgateway, :9091) |
 
@@ -176,8 +181,12 @@ flowchart LR
     CUR -->|PUT + COPY, replace month| SF[(Snowflake RAW)]
     SF --> DBT[dbt: staging -> intermediate -> marts]
     DBT --> MARTS[(MARTS: fact_trips, dim_zone,<br/>dim_date, agg_zone_hour)]
+    MARTS --> EV[(monthly aggregates agg_*<br/>and evidence ev_*)]
     MARTS --> Q16[sql/q1..q6 -> results/YYYY/RESULTS_MM.md]
+    EV --> Q16
     MARTS --> SUP[Superset dashboards]
+    EV --> RESP[Superset evidence dashboards]
+    Q16 <-->|compared on every run| RESP
 ```
 
 Every row read ends in **curated** or in **quarantine**. The invariant
@@ -187,7 +196,7 @@ Every row read ends in **curated** or in **quarantine**. The invariant
 |---|---|---|
 | Raw (bronze) | `s3://<bucket>/raw/yellow/year=YYYY/month=MM/`, mirrored in `data/raw/` | Airbyte + `src/ingesta_airbyte.py` |
 | Curated + quarantine (silver) | `data/curated/yellow/year=/month=/`, `data/quarantine/...` | `src/calidad.py` (DuckDB) |
-| Warehouse RAW | `NYC_TAXI.RAW.YELLOW_TRIPS`, `TAXI_ZONES`, `LOAD_LOG` | `src/load_snowflake.py` |
+| Warehouse RAW | `NYC_TAXI.RAW.YELLOW_TRIPS`, `YELLOW_QUARANTINE`, `TAXI_ZONES`, `LOAD_LOG`, and the quality and schema reports (`QUALITY_SUMMARY`, `QUALITY_RULES`, `SCHEMA_FINDINGS`) | `src/load_snowflake.py` |
 | Staging / marts (gold) | `NYC_TAXI.STAGING` (views), `NYC_TAXI.MARTS` (tables) | dbt (`dbt_taxi/`) |
 
 Why each tool:
@@ -207,9 +216,11 @@ contracts/          yellow_schema.yaml, taxi_zone_schema.yaml, quality_rules.yam
 airbyte/            connections/*.yaml (versioned Airbyte config, no secrets) + README_AIRBYTE.md
 src/                config, ingesta_airbyte, esquema, calidad, load_snowflake, resultados,
                     interpretacion (Spanish interpretations written from the numbers of each run),
+                    evidencia (which Superset chart backs each figure, and the audit that checks it),
+                    respaldo (evidence dashboards and their comparison with the reports),
                     orchestration (Dagster), dagster_instance (shared run history), dashboards
                     (Superset as code), observability, exploracion, demos, clean
-dbt_taxi/           dbt project: staging (views), intermediate (ephemeral), marts, tests, macros
+dbt_taxi/           dbt project: staging (views), intermediate (ephemeral), marts, evidence (ev_*), tests, macros
 sql/                q1..q6 (one query per file) + contexto/ (context queries the interpretations use)
 results/            2025/ and 2026/: RESULTS_MM.md, one Spanish report per month (MES vs the same month a year before)
 snowflake/          setup.sql (warehouses, monitor, schemas, tags, role) + finops.sql
@@ -219,7 +230,7 @@ dagster/            Dockerfile + supervisor of the Dagster UI container (reloads
 docker/             pipeline-make.sh: `make` of the pipeline container (adapts .env to the container)
 Dockerfile          pipeline container: Python 3.12, GNU make and requirements.txt (runs make without installing it)
 requirements.txt    every library of the pipeline, pinned to the validated versions (pip install -r requirements.txt)
-tests/              pytest: quality rules, idempotency, reconciliation, schema, two-command run
+tests/              pytest: quality rules, idempotency, reconciliation, schema, reports, evidence, dashboards, two-command run
 docs/               Spanish project documentation (Documentacion_Pipeline_NYC_Taxi.docx)
 docker-compose.yml  Dagster UI + its Postgres, observability and BI stack, and the pipeline container
 Makefile            the only command you need
@@ -428,6 +439,7 @@ updates on every run, month by month:
 | `DATA_DIR/quarantine/yellow/year=YYYY/month=MM/part-0.parquet` | One row per rejected trip: the contract columns as read, `source_file`, `source_row_number` (points to the untouched raw row), `violated_rules` (for example `R03;R04`), `warning_flags`, `run_id`, `quarantined_at`. |
 | Warehouse table `RAW.YELLOW_QUARANTINE` (Snowflake), `raw.yellow_quarantine` (DuckDB) | The same rows, loaded like the trips: the month is deleted and reloaded in one transaction, with the count checked and a row in `LOAD_LOG`. dbt reads it as a source and builds `marts.agg_quarantine_rule` (rows per month and rule). |
 | `s3://<bucket>/quarantine/yellow/year=YYYY/month=MM/part-0.parquet` (cloud mode) | The quarantine file in the lake, next to `raw/`. The month's prefix is replaced on every run. |
+| Warehouse tables `RAW.QUALITY_SUMMARY`, `RAW.QUALITY_RULES` and `RAW.SCHEMA_FINDINGS` | The quality and schema reports of each month (rows read, accepted, quarantined and with warnings; rows per rule, warnings included; what the file brought compared with the contract). They are replaced by month, and the Spanish reports and Superset read them from here. |
 
 Dagster shows it as the asset `raw/yellow_quarantine`, with its rows per rule, local file and S3
 URI. Superset shows it in the **Data Quality & Quarantine** dashboard, which has the rules table, the
@@ -510,12 +522,23 @@ not appended.
 | `dim_date` | one row per **calendar day of each processed month** | ISO day of week, day name, weekend flag, `year_month` |
 | `agg_zone_hour` | one row per **pickup zone × pickup date × pickup hour** with trips | trips, total revenue (sum of `total_amount`), average duration; incremental by (year, month) |
 
-dbt runs tests on every build (34 in total):
+**Monthly aggregates and evidence** (dbt, same schema). Neither the reports nor the evidence dashboards scan
+the trips: both read these tables, so a figure of a report and its chart are the same stored value.
+
+| Tables | Grain | Notes |
+|---|---|---|
+| `agg_month_profile`, `agg_zone_month`, `agg_hour_month`, `agg_day`, `agg_payment_month`, `agg_airport_month`, `top_fare_trips` | one row per month (and zone, hour, day, payment type or rank) | incremental by (year, month), like `agg_zone_hour`: each run only reads its two months |
+| `ev_comparaciones`, `ev_periodos`, `ev_cobertura` | one row per comparison, per period, and per calendar month of each year | which months can be compared with what is loaded (a month whose previous year is missing has no evidence) |
+| `ev_indicadores` | one row per comparison and indicator | value of the month, of the same month a year before, difference and change in % |
+| `ev_zonas`, `ev_boroughs`, `ev_horas`, `ev_dias`, `ev_dias_semana`, `ev_cbd_zonas`, `ev_pagos`, `ev_tarifas_altas`, `ev_calidad`, `ev_reglas`, `ev_esquema` | one row per comparison and zone, borough, hour, day... | both months side by side; small tables, rebuilt on every run |
+
+dbt runs tests on every build (54 in total):
 - `unique` and `not_null` on the keys;
 - `relationships` from the fact to both dimensions;
-- `accepted_values` for `payment_type`;
-- two singular reconciliations: `fact_trips` = RAW per month, and `agg_zone_hour` adds up to
-  `fact_trips` with a unique grain.
+- `accepted_values` for `payment_type` and the states of the evidence;
+- four singular reconciliations: `fact_trips` = RAW per month, `agg_zone_hour` adds up to
+  `fact_trips` with a unique grain, every monthly aggregate adds up to `fact_trips`, and the evidence
+  has one row per comparison and key.
 
 **Questions:** `sql/q1..q6` (one query per file), run by `make questions` (and by `make all`) into
 **`results/YYYY/RESULTS_MM.md`**, one file per month: `make all MES=2025-02` writes
@@ -532,119 +555,134 @@ Each report has, in Spanish:
   what drives the quarantine and what changed, and what each file brought compared with the contract
   (missing columns, new columns, retyped columns, values that could not be cast, legacy formats);
 - the six questions, each with its query, its table and its **interpretation**;
-- conclusions.
+- conclusions;
+- **Respaldo en Superset**: after each block, the links to the charts that show its figures; at the end,
+  the result of the comparison with Superset, the index of charts and, for every single number of the
+  report, the chart, column and row where it is shown.
+
+Before a report is written, the answers of `sql/q1..q6` are reconciled cell by cell with the evidence tables
+(`ev_*`) that the charts read; if one differs, the run fails and the previous report stays. Then every number of
+the text is looked up in the charts its own block cites: a number that none of them shows is listed in the report
+as *sin respaldo* and the Dagster check `cifras_respaldadas` warns. That audit found a real mistake in an earlier
+report (July 2025 said 15.3% where the data says 15.2%, a figure rounded twice).
+
+**When there is nothing to compare**, the report says so and has no figures: the TLC has not published the month
+yet, the month of this year has not started, the previous year does not exist (2009), or one of the two months is
+not in the warehouse. It never replaces a report that has figures, and `make all` replaces it as soon as the month
+can be compared. A typo (`MES=2025-13`) or a year that has not started only prints the reason.
+
+`make questions-year MES=2025-01` writes again the reports of every month of 2025 that can be compared with what is
+loaded (it only reads the marts), and `make all-year MES=2025-01` runs the whole pipeline for the 12 months.
 
 **The interpretations are not static text.** `src/interpretacion.py` writes every sentence from the
-numbers of the run: the six questions, the context queries of [`sql/contexto/`](sql/contexto) (month
-profile, zones, hours, calendar, CBD toll per day, payments, airports, fares above US$ 500) and the
-schema and quality reports of the control database. It decides, for example, whether a zone "grows" or
+numbers of the run: the six questions and the context queries of [`sql/contexto/`](sql/contexto) (month
+profile, zones, hours, calendar, CBD toll per day, payments, airports, fares above US$ 500, and the
+schema and quality reports), which read the monthly aggregates and the evidence tables. It decides, for example, whether a zone "grows" or
 "stays", which weekdays a month has five times and what the change would be with the other month's
 calendar, whether the CBD toll did not exist yet, started during the month or can be compared, and
 whether a single fare above US$ 500 is what moves an average (then it names the trip and gives the
-figure without it). If the control database has no quality report for a month (for example
-`make questions` against Snowflake from another computer), the counts come from the warehouse
-(`fact_trips` and `RAW.YELLOW_QUARANTINE`) and the report says so.
+figure without it). If the warehouse has no quality report of the rows it holds for a month, the counts come
+from the rows themselves (`fact_trips` and `RAW.YELLOW_QUARANTINE`, without warnings) and the report says so.
 
 ### Results of the last run
 
 <!-- RESULTADOS:START - generated by `make questions` from sql/q*.sql and src/interpretacion.py; do not edit by hand -->
 
-Assigned month **2026-09** vs **2025-09**, from the dbt marts in DuckDB (offline validation target) (`make all MES=2026-09 INGEST_MODE=direct WAREHOUSE=duckdb`, run `20261118T045143Z-2dc8eb`, 2026-11-18). The full report, with the SQL and the data quality and quarantine section, is [results/2026/RESULTS_09.md](results/2026/RESULTS_09.md). The interpretations are in Spanish and are written by `src/interpretacion.py` from the numbers of the run.
+Assigned month **2025-01** vs **2024-01**, from the dbt marts in DuckDB (offline validation target) (`make all MES=2025-01 INGEST_MODE=direct WAREHOUSE=duckdb`, run `20261124T020953Z-774490`, 2026-11-24). The full report, with the SQL, the data quality and quarantine section and the Superset chart behind every figure, is [results/2025/RESULTS_01.md](results/2025/RESULTS_01.md). Its evidence dashboard in Superset is [`respaldo-local-2025-01`](http://localhost:8090/superset/dashboard/respaldo-local-2025-01/). The interpretations are in Spanish and are written by `src/interpretacion.py` from the numbers of the run.
 
 One report per month, always against the same month of the previous year (`make all MES=YYYY-MM` writes `results/YYYY/RESULTS_MM.md`):
 
 - **2025**: [RESULTS_01.md](results/2025/RESULTS_01.md) (enero 2025 vs enero 2024), [RESULTS_02.md](results/2025/RESULTS_02.md) (febrero 2025 vs febrero 2024), [RESULTS_03.md](results/2025/RESULTS_03.md) (marzo 2025 vs marzo 2024), [RESULTS_04.md](results/2025/RESULTS_04.md) (abril 2025 vs abril 2024), [RESULTS_05.md](results/2025/RESULTS_05.md) (mayo 2025 vs mayo 2024), [RESULTS_06.md](results/2025/RESULTS_06.md) (junio 2025 vs junio 2024), [RESULTS_07.md](results/2025/RESULTS_07.md) (julio 2025 vs julio 2024), [RESULTS_08.md](results/2025/RESULTS_08.md) (agosto 2025 vs agosto 2024), [RESULTS_09.md](results/2025/RESULTS_09.md) (septiembre 2025 vs septiembre 2024), [RESULTS_10.md](results/2025/RESULTS_10.md) (octubre 2025 vs octubre 2024), [RESULTS_11.md](results/2025/RESULTS_11.md) (noviembre 2025 vs noviembre 2024), [RESULTS_12.md](results/2025/RESULTS_12.md) (diciembre 2025 vs diciembre 2024).
 - **2026**: [RESULTS_01.md](results/2026/RESULTS_01.md) (enero 2026 vs enero 2025), [RESULTS_02.md](results/2026/RESULTS_02.md) (febrero 2026 vs febrero 2025), [RESULTS_03.md](results/2026/RESULTS_03.md) (marzo 2026 vs marzo 2025), [RESULTS_04.md](results/2026/RESULTS_04.md) (abril 2026 vs abril 2025), [RESULTS_05.md](results/2026/RESULTS_05.md) (mayo 2026 vs mayo 2025), [RESULTS_06.md](results/2026/RESULTS_06.md) (junio 2026 vs junio 2025), [RESULTS_07.md](results/2026/RESULTS_07.md) (julio 2026 vs julio 2025), [RESULTS_08.md](results/2026/RESULTS_08.md) (agosto 2026 vs agosto 2025), [RESULTS_09.md](results/2026/RESULTS_09.md) (septiembre 2026 vs septiembre 2025).
 
-> En septiembre 2026 los taxis amarillos hicieron 3.667.332 viajes válidos, −8,2 % que en septiembre 2025 (3.996.265), con una recaudación de US$ 118,0 M (+2,4 %).
+> En enero 2025 los taxis amarillos hicieron 3.323.437 viajes válidos, +15,8 % que en enero 2024 (2.870.896), con una recaudación de US$ 88,3 M (+12,7 %).
 
 #### Q1. Top 10 pickup zones by trips in the assigned month, and their change vs the same month of the previous year.
 
 | borough | pickup_zone | trips_assigned | trips_comparison | trips_change | trips_change_pct |
 |---|---|---|---|---|---|
-| Manhattan | Upper East Side South | 165,197 | 178,552 | -13,355 | -7.48 |
-| Manhattan | Upper East Side North | 147,307 | 154,352 | -7,045 | -4.56 |
-| Queens | JFK Airport | 146,023 | 169,419 | -23,396 | -13.81 |
-| Manhattan | Midtown Center | 138,647 | 159,404 | -20,757 | -13.02 |
-| Manhattan | Penn Station/Madison Sq West | 114,740 | 129,298 | -14,558 | -11.26 |
-| Manhattan | Lincoln Square East | 106,139 | 105,757 | 382 | 0.36 |
-| Manhattan | Midtown East | 106,049 | 122,012 | -15,963 | -13.08 |
-| Manhattan | East Chelsea | 100,405 | 106,711 | -6,306 | -5.91 |
-| Manhattan | Times Sq/Theatre District | 99,520 | 114,854 | -15,334 | -13.35 |
-| Manhattan | East Village | 99,207 | 102,998 | -3,791 | -3.68 |
+| Manhattan | Midtown Center | 163,866 | 140,220 | 23,646 | 16.86 |
+| Manhattan | Upper East Side South | 159,330 | 140,160 | 19,170 | 13.68 |
+| Manhattan | Upper East Side North | 151,616 | 134,027 | 17,589 | 13.12 |
+| Queens | JFK Airport | 134,804 | 138,341 | -3,537 | -2.56 |
+| Manhattan | Times Sq/Theatre District | 120,657 | 102,999 | 17,658 | 17.14 |
+| Manhattan | Penn Station/Madison Sq West | 115,021 | 102,165 | 12,856 | 12.58 |
+| Manhattan | Midtown East | 113,840 | 104,374 | 9,466 | 9.07 |
+| Manhattan | Lincoln Square East | 107,540 | 101,847 | 5,693 | 5.59 |
+| Manhattan | Upper West Side South | 93,831 | 86,532 | 7,299 | 8.44 |
+| Manhattan | Midtown North | 92,702 | 83,711 | 8,991 | 10.74 |
 
-**Interpretación:** Nueve de las diez zonas con más pickups están en Manhattan. Dentro del top 10, nueve caen (entre −3,7 % en East Village y −13,8 % en JFK Airport) y una se mantiene. Upper East Side South lidera con 165.197 viajes (−7,5 %). Respecto de septiembre 2025 entran al top 10 Lincoln Square East y East Village y salen Union Sq y Murray Hill. En los aeropuertos, JFK (puesto 3 del top) cae −13,8 % y LaGuardia (fuera del top) cae −7,2 %: JFK va peor que el total de la ciudad y LaGuardia queda en línea con él (−8,2 %). La concentración casi no cambia: el top 10 reúne el 33,4 % de los pickups (33,7 % en 2025). Fuera de Manhattan, el Bronx cae −36,6 % en sus pickups (29.050 → 18.428), aunque sobre una base chica, contra −8,2 % del total.
+**Interpretación:** Nueve de las diez zonas con más pickups están en Manhattan. Dentro del top 10, nueve crecen (entre +5,6 % en Lincoln Square East y +17,1 % en Times Sq/Theatre District) y una cae (JFK Airport −2,6 %). Midtown Center lidera con 163.866 viajes (+16,9 %). Respecto de enero 2024 entra al top 10 Midtown North y sale LaGuardia Airport. En los aeropuertos, JFK (puesto 4 del top) cae −2,6 % y LaGuardia (fuera del top) cae −1,4 %: el crecimiento de 2025 es de viajes urbanos, no de aeropuertos. La demanda además se reparte más: el top 10 concentra el 37,7 % de los pickups, frente al 39,7 % de 2024. Fuera de Manhattan, Brooklyn casi triplica sus pickups (22.286 → 60.244), aunque sobre una base chica, contra +15,8 % del total.
 
 #### Q2. Hour of the day with the highest average revenue per trip (revenue = total_amount), for each of the two months.
 
 | year | month | pickup_hour | trips | avg_revenue_per_trip |
 |---|---|---|---|---|
-| 2026 | 9 | 5 | 35,231 | 37.70 |
-| 2025 | 9 | 16 | 222,524 | 33.99 |
+| 2025 | 1 | 5 | 21,233 | 33.64 |
+| 2024 | 1 | 5 | 17,490 | 37.54 |
 
-**Interpretación:** La hora con mayor ingreso promedio por viaje cambia: las 5:00 en 2026 (US$ 37,70) y las 16:00 en 2025 (US$ 33,99). Es una hora de poco volumen (35.231 viajes, contra 233.026 a las 20:00, la hora pico de demanda). Gana porque a esa hora pesan los viajes largos: el 19,3 % de sus viajes toca JFK o LaGuardia (contra 8,3 % en todo el mes) y la distancia media es de 6,02 millas (contra 3,67).
+**Interpretación:** La hora con mayor ingreso promedio por viaje es las 5:00 en los dos años: US$ 33,64 en 2025 y US$ 37,54 en 2024. Es una hora de poco volumen (21.233 viajes, contra 242.182 a las 18:00, la hora pico de demanda en ambos años). Gana porque a esa hora pesan los viajes largos: el 20,8 % de sus viajes toca JFK o LaGuardia (contra 8,2 % en todo el mes) y la distancia media es de 5,71 millas (contra 3,16). En 2025 los viajes de aeropuerto son menos (del 25,8 % al 20,8 % de los viajes de las 5:00) y la distancia media baja (de 6,23 a 5,71 millas), por eso el ingreso por viaje cae un 10,4 %. Ojo con el segundo puesto de 2025 (las 12:00, US$ 30,68): es artificial, porque lo infla un viaje con una tarifa de US$ 863.372,12. Sin las tarifas mayores a US$ 500, esa hora queda en US$ 25,59.
 
 #### Q3. Share of trips with cbd_congestion_fee > 0 in the assigned month, and the 5 pickup zones with the highest share.
 
 | scope | borough | trips | trips_with_cbd_fee | pct_with_cbd_fee |
 |---|---|---|---|---|
-| ALL ZONES |  | 3,667,332 | 2,780,820 | 75.83 |
-| West Village | Manhattan | 79,922 | 79,850 | 99.91 |
-| Greenwich Village South | Manhattan | 52,988 | 52,936 | 99.90 |
-| East Village | Manhattan | 99,207 | 99,097 | 99.89 |
-| SoHo | Manhattan | 32,803 | 32,766 | 99.89 |
-| Lower East Side | Manhattan | 52,995 | 52,934 | 99.88 |
+| ALL ZONES |  | 3,323,437 | 2,192,727 | 65.98 |
+| Stuy Town/Peter Cooper Village | Manhattan | 5,344 | 4,842 | 90.61 |
+| Alphabet City | Manhattan | 7,110 | 6,433 | 90.48 |
+| Union Sq | Manhattan | 92,363 | 83,546 | 90.45 |
+| Midtown East | Manhattan | 113,840 | 102,890 | 90.38 |
+| Midtown Center | Manhattan | 163,866 | 147,299 | 89.89 |
 
-**Interpretación:** El 75,83 % de los viajes de septiembre 2026 pagó cbd_congestion_fee (2.780.820 de 3.667.332, siempre US$ 0,75). Las cinco zonas con mayor proporción (West Village, Greenwich Village South, East Village, SoHo y Lower East Side, alrededor del 100 %) están todas en Manhattan, dentro de la zona de peaje. En septiembre 2025 lo pagaba el 74,01 % de los viajes: la proporción sube +1,8 pp. La regla R10 marcó 9.618 filas con un cobro anómalo (negativo, es decir una reversión, o anterior al inicio del peaje): se conservan con su marca.
+**Interpretación:** El 65,98 % de los viajes de enero 2025 pagó cbd_congestion_fee (2.192.727 de 3.323.437, siempre US$ 0,75). El porcentaje está diluido porque el peaje empezó el 5 de enero: del 1 al 4 (10,4 % de los viajes del mes) casi nadie lo pagó (0,12 %; esos cobros anticipados quedan marcados por la regla R10), y desde el 5 lo paga el 73,6 %. Las cinco zonas con mayor proporción (Stuy Town/Peter Cooper Village, Alphabet City, Union Sq, Midtown East y Midtown Center, alrededor del 90 %) están todas en Manhattan, dentro de la zona de peaje. En enero 2024 la columna no existía y quedó en NULL (no en 0), así que este indicador no tiene contra qué compararse. La regla R10 marcó 6.954 filas con un cobro anómalo (negativo, es decir una reversión, o anterior al inicio del peaje): se conservan con su marca.
 
 #### Q4. Average tip as a percentage of the fare, by payment type (both months).
 
 | year | month | payment_type | payment_type_name | trips | avg_tip_pct | weighted_tip_pct |
 |---|---|---|---|---|---|---|
-| 2026 | 9 | 0 | Flex Fare | 1,078,694 | 1.30 | 1.00 |
-| 2026 | 9 | 1 | Credit card | 2,266,594 | 24.79 | 22.14 |
-| 2026 | 9 | 2 | Cash | 303,541 | 0.00 | 0.00 |
-| 2026 | 9 | 3 | No charge | 6,074 | 0.00 | 0.00 |
-| 2026 | 9 | 4 | Dispute | 11,017 | 0.01 | 0.01 |
-| 2026 | 9 | 5 | Unknown | 2 | 27.30 | 25.55 |
-| 2025 | 9 | 0 | Flex Fare | 827,190 | 1.44 | 1.49 |
-| 2025 | 9 | 1 | Credit card | 2,605,862 | 25.82 | 21.39 |
-| 2025 | 9 | 2 | Cash | 338,108 | 0.00 | 0.00 |
-| 2025 | 9 | 3 | No charge | 14,000 | 0.08 | 0.03 |
-| 2025 | 9 | 4 | Dispute | 52,082 | 0.05 | 0.04 |
+| 2025 | 1 | 0 | Flex Fare | 412,946 | 2.74 | 3.02 |
+| 2025 | 1 | 1 | Credit card | 2,423,279 | 26.29 | 22.94 |
+| 2025 | 1 | 2 | Cash | 367,786 | 0.00 | 0.00 |
+| 2025 | 1 | 3 | No charge | 12,025 | 0.01 | 0.02 |
+| 2025 | 1 | 4 | Dispute | 35,497 | 0.03 | 0.02 |
+| 2024 | 1 | 0 | Flex Fare | 115,127 | 9.14 | 9.06 |
+| 2024 | 1 | 1 | Credit card | 2,297,767 | 26.26 | 22.62 |
+| 2024 | 1 | 2 | Cash | 422,562 | 0.00 | 0.00 |
+| 2024 | 1 | 3 | No charge | 10,383 | 0.04 | 0.03 |
+| 2024 | 1 | 4 | Dispute | 22,680 | 0.03 | 0.02 |
 
-**Interpretación:** Con tarjeta de crédito la propina baja: 24,79 % de la tarifa en 2026 frente a 25,82 % en 2025 (22,1 % y 21,4 % ponderada), y deja propina el 91 % de esos viajes. En efectivo da casi 0 % porque la TLC no registra las propinas en efectivo, no porque no se dejen. El cambio grande es Flex Fare (payment_type 0, tarifa fija acordada por app), que pasa del 24,7 % al 29,4 % de los viajes (827.190 → 1.078.694 con tarifa > 0) y cuya propina se mantiene en torno al 1,3 %. Esos viajes llegan sin passenger_count, y por eso las advertencias de la regla R05 suben del 25,6 % al 31,0 % de las filas leídas. La tarjeta pierde peso entre las formas de pago: del 65,2 % al 61,8 % de los viajes. "No charge" y "Dispute" tienen una propina cercana a 0, como es esperable.
+**Interpretación:** Con tarjeta de crédito la propina se mantiene estable: 26,29 % de la tarifa en 2025 frente a 26,26 % en 2024 (22,9 % y 22,6 % ponderada), y deja propina el 94 % de esos viajes. En efectivo da casi 0 % porque la TLC no registra las propinas en efectivo, no porque no se dejen. El cambio grande es Flex Fare (payment_type 0, tarifa fija acordada por app), que pasa del 4,1 % al 14,6 % de los viajes (115.127 → 412.946 con tarifa > 0) y cuya propina cae del 9,14 % al 2,74 %. Esos viajes llegan sin passenger_count, y por eso las advertencias de la regla R05 suben del 5,8 % al 16,3 % de las filas leídas. La tarjeta pierde peso entre las formas de pago: del 80,0 % al 72,9 % de los viajes. "No charge" y "Dispute" tienen una propina cercana a 0, como es esperable.
 
 #### Q5. Trips and average fare of trips that start or end at JFK or LaGuardia, identified by zone name.
 
 | year | month | airport_trips | avg_fare_amount | trips_touching_jfk | trips_touching_lga |
 |---|---|---|---|---|---|
-| 2026 | 9 | 304,762 | 56.49 | 173,072 | 134,378 |
-| 2025 | 9 | 336,219 | 58.25 | 197,728 | 141,541 |
+| 2025 | 1 | 270,966 | 58.03 | 157,420 | 116,346 |
+| 2024 | 1 | 276,027 | 55.04 | 162,026 | 117,140 |
 
-**Interpretación:** Los viajes que empiezan o terminan en JFK o LaGuardia bajan un 9,4 % (336.219 → 304.762) mientras el total de la ciudad baja un 8,2 %, así que su peso cae del 8,4 % al 8,3 % de los viajes. Por aeropuerto, JFK cae −12,5 % y LaGuardia cae −5,1 %. La tarifa promedio baja de US$ 58,25 a US$ 56,49 (−3,0 %), pero esa baja está exagerada: la produce un solo viaje de 2025 con fare_amount = US$ 323.800,27 (de JFK Airport a Midtown South, 11,8 millas, pago efectivo). Excluyendo las tarifas mayores a US$ 500 en los dos años, el promedio pasa de US$ 57,26 a US$ 56,46 (−1,4 %), y la mediana baja de US$ 58,30 a US$ 56,20. La tarifa fija de JFK (RatecodeID 2) sigue en US$ 70,00. Ninguna regla de calidad pone un tope a la tarifa; ese hueco queda documentado como limitación.
+**Interpretación:** Los viajes que empiezan o terminan en JFK o LaGuardia bajan un 1,8 % (276.027 → 270.966) mientras el total de la ciudad sube un 15,8 %, así que su peso cae del 9,6 % al 8,2 % de los viajes. Por aeropuerto, JFK cae −2,8 % y LaGuardia cae −0,7 %. La tarifa promedio sube de US$ 55,04 a US$ 58,03 (+5,4 %), pero esa suba no es real: la produce un solo viaje de 2025 con fare_amount = US$ 863.372,12 (de LaGuardia Airport a Astoria Park, 1,6 millas, pago Dispute). Excluyendo las tarifas mayores a US$ 500 en los dos años, el promedio pasa de US$ 55,01 a US$ 54,82 (−0,3 %), y la mediana baja de US$ 53,53 a US$ 52,70. La tarifa fija de JFK (RatecodeID 2) sigue en US$ 70,00. Ninguna regla de calidad pone un tope a la tarifa; ese hueco queda documentado como limitación.
 
 #### Q6. Change in total trips and average fare between the assigned month and the same month of the previous year.
 
 | trips_assigned | trips_comparison | trips_change | trips_change_pct | avg_fare_assigned | avg_fare_comparison | avg_fare_change_pct |
 |---|---|---|---|---|---|---|
-| 3,667,332 | 3,996,265 | -328,933 | -8.23 | 23.00 | 19.99 | 15.08 |
+| 3,323,437 | 2,870,896 | 452,541 | 15.76 | 17.73 | 18.47 | -4.00 |
 
 **Interpretación:**
 
-- Septiembre 2026 tuvo 3.667.332 viajes válidos contra 3.996.265 en septiembre 2025: −328.933 viajes (−8,23 %). La recaudación total (total_amount) crece un 2,4 %, de US$ 115,2 M a US$ 118,0 M.
-- El calendario favorece a septiembre 2026: septiembre 2026 tuvo 5 miércoles, y septiembre 2025, 5 lunes (días flojos). Con el calendario de 2025 la variación sería −8,7 %. Todos los días de la semana caen (por día), entre −7 % y −12 %, así que la baja es general.
-- La tarifa promedio sube un 15,08 % (de US$ 19,99 a US$ 23,00); sin las tarifas mayores a US$ 500 (entre ellas, el viaje de US$ 323.800) la suba es del 15,6 % (de US$ 19,90 a US$ 23,00). La mediana pasa de US$ 14,90 a US$ 17,20 (+15,4 %): el cambio de tarifas es general, no solo de la mezcla.
-- En la mezcla de septiembre 2026 hay más viajes Flex Fare, que son más caros (US$ 29,42 contra US$ 20,32 del resto) y pasan del 25 % al 29 % de los viajes y menos viajes de más de 10 millas (del 8,3 % al 8,0 %). Sin Flex Fare y sin tarifas mayores a US$ 500, la tarifa media baja un 1,6 % (de US$ 20,65 a US$ 20,32).
-- Calidad: la cuarentena baja del 5,99 % al 5,38 % de las filas leídas (208.712 filas en septiembre 2026 y 254.750 en septiembre 2025). La explican sobre todo R03 (distancia faltante, cero o negativa, o mayor al máximo fijado: 3,80 % contra 2,93 %) y R02 (dropoff sin fecha, anterior o igual al pickup: 1,24 % contra 1,35 %). En los dos meses se cumple la reconciliación: leídas = aceptadas + cuarentena.
+- Enero 2025 tuvo 3.323.437 viajes válidos contra 2.870.896 en enero 2024: +452.541 viajes (+15,76 %). La recaudación total (total_amount) crece un 12,7 %, de US$ 78,4 M a US$ 88,3 M.
+- Parte del salto es de calendario: enero 2025 tuvo 5 jueves y 5 viernes (días fuertes), y enero 2024, 5 lunes y 5 martes (días flojos). Con el calendario de 2024 la variación sería +14,7 %. Todos los días de la semana crecen (por día), entre +11 % y +21 %, así que el aumento es real.
+- La tarifa promedio baja un 4,00 % (de US$ 18,47 a US$ 17,73); sin las tarifas mayores a US$ 500 (entre ellas, el viaje de US$ 863.372) la baja es del 5,4 % (de US$ 18,46 a US$ 17,47). La mediana no cambia (US$ 12,80): no bajaron las tarifas, cambió la mezcla de viajes.
+- En la mezcla de enero 2025 hay más viajes Flex Fare, que son más baratos (US$ 14,84 contra US$ 17,91 del resto) y pasan del 4 % al 15 % de los viajes, menos viajes a aeropuertos (del 9,6 % al 8,2 %) y menos viajes de más de 10 millas (del 7,8 % al 6,8 %). Sin Flex Fare y sin tarifas mayores a US$ 500, la tarifa media baja un 2,6 % (de US$ 18,40 a US$ 17,91). El viaje promedio es más corto: 3,16 contra 3,29 millas.
+- Calidad: la cuarentena sube del 3,16 % al 4,37 % de las filas leídas (151.789 filas en enero 2025 y 93.728 en enero 2024). La explican sobre todo R03 (distancia faltante, cero o negativa, o mayor al máximo fijado: 2,62 % contra 2,04 %) y R04 (total cobrado faltante o negativo: 1,81 % contra 1,20 %). En los dos meses se cumple la reconciliación: leídas = aceptadas + cuarentena.
 
 #### Conclusiones
 
-- La demanda de taxis amarillos cae en forma moderada en septiembre 2026 (−8,2 % de viajes, +2,4 % de recaudación). Las zonas que más pierden viajes son JFK Airport (−13,8 %), Midtown Center (−13,0 %) y Midtown East (−13,1 %).
-- El peaje de congestión (CBD) alcanza al 75,8 % de los viajes de septiembre 2026, contra 74,0 % en septiembre 2025.
-- El viaje promedio es más largo (3,67 contra 3,63 millas) y más caro sin contar las tarifas mayores a US$ 500 (mediana US$ 14,90 → US$ 17,20). La propina con tarjeta baja (25,8 % → 24,8 %).
-- Los promedios son frágiles: 58 viajes con tarifas mayores a US$ 500 (el mayor, de US$ 323.800,27, en 2025) alcanzan para mover la tarifa media de los aeropuertos y la tarifa media del mes, por eso se reportan también la mediana y el promedio sin tarifas mayores a US$ 500. La siguiente regla de calidad a agregar es un tope de tarifa o de tarifa por milla.
-- Los archivos traen cambios de formato que el pipeline absorbe sin romperse (septiembre 2026: columna nueva ignorada: request_source). La cuarentena es del 5,38 % y del 5,99 % de las filas leídas y los dos meses reconcilian. Las cifras salen de los marts de dbt en DuckDB (modo local) y se reproducen con `make all MES=2026-09 INGEST_MODE=direct WAREHOUSE=duckdb`.
+- La demanda de taxis amarillos crece con fuerza en enero 2025 (+15,8 % de viajes, +12,7 % de recaudación). Las zonas que más suman viajes son Midtown Center (+16,9 %), Upper East Side South (+13,7 %) y Union Sq (+24,1 %), mientras los aeropuertos se quedan atrás.
+- El peaje de congestión (CBD) alcanza al 66,0 % de los viajes de enero 2025. Las zonas con mayor proporción de cobro también crecen en viajes (Stuy Town/Peter Cooper Village +56,3 %, Alphabet City +117,2 % y Union Sq +24,1 %): en este mes no se observa una caída de demanda donde se cobra. Es una correlación, no una medición de causa.
+- El viaje promedio es más corto (3,16 contra 3,29 millas) y más barato sin contar las tarifas mayores a US$ 500: la mediana sigue en US$ 12,80, así que el cambio viene de la mezcla de viajes (más Flex Fare, menos aeropuertos y menos viajes largos). La propina con tarjeta no se mueve (26,3 % → 26,3 %).
+- Los promedios son frágiles: 40 viajes con tarifas mayores a US$ 500 (el mayor, de US$ 863.372,12, en 2025) alcanzan para mover el ranking de horas, la tarifa media de los aeropuertos y la tarifa media del mes, por eso se reportan también la mediana y el promedio sin tarifas mayores a US$ 500. La siguiente regla de calidad a agregar es un tope de tarifa o de tarifa por milla.
+- Los archivos traen cambios de formato que el pipeline absorbe sin romperse (enero 2024: no trae cbd_congestion_fee, que queda en NULL). La cuarentena es del 4,37 % y del 3,16 % de las filas leídas y los dos meses reconcilian. Las cifras salen de los marts de dbt en DuckDB (modo local) y se reproducen con `make all MES=2025-01 INGEST_MODE=direct WAREHOUSE=duckdb`.
 
 <!-- RESULTADOS:END -->
 
@@ -655,22 +693,25 @@ One report per month, always against the same month of the previous year (`make 
 `make all MES=2025-01` runs `src/orchestration.py`. The monthly assets use **dynamic partitions**
 (`YYYY-MM`): only the processed months exist, because `make all` registers the assigned month and
 its comparison month. The UI therefore shows 2/2 materialized instead of a calendar of empty months.
-Assets are grouped by layer: `ingestion` → `quality` → `warehouse` → `staging` → `marts` →
+Assets are grouped by layer: `ingestion` → `quality` → `warehouse` → `staging` → `marts` → `evidence` →
 `analytics`.
 
 ```
 taxi_zone_lookup ─┐
 raw_yellow_trips ─┴> yellow_schema_report -> curated_yellow_trips ─┬> raw/yellow_trips ──────┐
-                                             (check: reconciliation) └> raw/yellow_quarantine ┤
+                                             (check: reconciliation) ├> raw/yellow_quarantine ┤
+                                                                     └> raw/quality_*, raw/schema_findings
                                         taxi_zone_lookup -> raw/taxi_zones ──────────────────┤
-                                                                                             └> dbt models ─┬> resultados_md (results/YYYY/RESULTS_MM.md)
-                                                                                                            └> superset_dashboards
+                                                                                             └> dbt models ─┬> resultados_md ──────┐ (check: cifras_respaldadas)
+                                                                                                            └> superset_dashboards ┴> superset_respaldo
+                                                                                                                                      (check: superset_coincide)
 ```
 
 - `raw/yellow_trips` and `raw/taxi_zones` share their asset keys with the dbt sources, so the lineage
   continues through `stg_*`, `fact_trips`, `dim_*` and `agg_zone_hour`. Each dbt model is an asset
-  (`dagster-dbt`). `superset_dashboards` (group `analytics`) closes the graph: it builds the six
-  dashboards on the marts.
+  (`dagster-dbt`). `superset_dashboards` (group `analytics`) builds the seven dashboards on the marts, and
+  `superset_respaldo` closes the graph: it builds the evidence dashboards of the reports and compares them
+  with the report of the run. Its check `superset_coincide` is blocking: if Superset shows something else, the run fails.
 - `make all` materializes **every** asset in order, one Dagster run per step: zones, each month
   (partition), zones load, dbt + questions, dashboards. The whole lineage ends up green.
 - **Run history shared by the host and the UI** (`src/dagster_instance.py`). `docker compose up -d`
@@ -687,14 +728,18 @@ raw_yellow_trips ─┴> yellow_schema_report -> curated_yellow_trips ─┬> ra
 - Without Docker, the history falls back to SQLite in `DATA_DIR/dagster_home`, and
   `make dagster-ui` opens a local UI on it (`DAGSTER_STORAGE=auto|postgres|sqlite`).
 - **Every dbt test is an asset check, so the run logs no warnings about tests.** The singular tests
-  that read two models (`assert_fact_matches_raw`, `assert_agg_zone_hour_grain`) name the model they
-  belong to in `meta.dagster.ref`, and the tests on the RAW sources are checks of `raw/yellow_trips`,
+  that read several models (`assert_fact_matches_raw`, `assert_agg_zone_hour_grain`,
+  `assert_evidence_matches_fact`, `assert_evidence_grain`) name the model they belong to in `meta.dagster.ref`, and the tests on the RAW sources are checks of `raw/yellow_trips`,
   `raw/taxi_zones` and `raw/yellow_quarantine` (`enable_source_tests_as_checks`). Those run right
   after each month is loaded, in the same Dagster run. Before, Dagster logged a warning for each of
   them ("Logging an AssetObservation instead of an AssetCheckResult").
 - **Before anything runs**, `make all` checks the month: the comparison month must be 2009-01 or
   later and the TLC must have published both months (a HEAD request to the TLC CDN, skipped for
-  months already ingested). Otherwise it stops at once with the reason, instead of failing halfway.
+  months already ingested). Otherwise it stops at once with the reason, instead of failing halfway, and the
+  report of that month says why it has no figures.
+- `make all-year MES=2025-01` (or `ANIO=2025`) runs the 12 months of the year, each one in its own process with
+  its own run id. A month that cannot run yet is reported and skipped, and a failed one does not stop the others
+  (the command ends with an error).
 - Jobs: `monthly_pipeline` (partitioned), `reference_data` and `warehouse_models` (with
   `make dagster-ui`, they can be launched from the UI).
 - Every step can also run alone (`make schema`, `make quality`...), and `make all-steps` chains
@@ -796,6 +841,51 @@ period):
   `nyc_airports` reads the trips once instead of twice, and `nyc_daily` joins 62 daily rows instead of
   millions of trips. The results are identical to the previous queries.
 
+### Evidence dashboards: what backs every report
+
+The seven dashboards above follow the last command. The **evidence dashboards** (Spanish, `src/respaldo.py`) stay: each
+report of `results/` has its own, and the last asset of `make all` (`superset_respaldo`) creates or updates the ones of
+the **12 months of the year of `MES`**, each month against the same month of the previous year:
+
+| Dashboard | What |
+|---|---|
+| `respaldo-<engine>-YYYY-MM`, one per comparable month | 54 charts in nine tabs: summary, quality and quarantine, the six questions, and the conclusions, each one next to the charts that back it |
+| `respaldo-<engine>-YYYY`, one per year | the 12 months of the year against the 12 of the year before: which months are loaded and what is missing, trips, revenue, fares, distance, CBD toll, Flex Fare, tips, airports, quarantine, every indicator, and the state of every report (17 charts) |
+
+`<engine>` is `local` (DuckDB copy) or `nube` (Snowflake): a report and its dashboard always read the same warehouse, and
+a run in one mode does not touch the evidence of the other. The address of January 2025 in local mode is
+http://localhost:8090/superset/dashboard/respaldo-local-2025-01/.
+
+How a figure is traced, from the report to the data:
+1. Each block of the report ends with **Respaldo en Superset** and the codes of its charts (`E1.1`, `C2.1`...). The links
+   open the dashboard of the month on that chart.
+2. The chart reads one evidence table (`marts.ev_*`), the same one the report read. Its name carries the code, and the
+   last section of the report says the column and row of every number.
+3. The evidence tables are dbt models on the monthly aggregates, which add up to `fact_trips` (a dbt test).
+
+What is checked on every run:
+- `sql/q1..q6` against the evidence, cell by cell (a difference stops the run before the report is written);
+- every number of the report against the charts its block cites (Dagster check `cifras_respaldadas`);
+- **Superset against the evidence**: the dashboards are read back as they are saved (charts, filters and layout), the data of
+  each chart is requested through the API and compared with the evidence, cell by cell. The result is written in the report
+  (*Verificación contra Superset*) and is the blocking check `superset_coincide`.
+
+`make superset-dashboards MES=2025-01` runs these steps alone, and `make verify-results MES=2025-01` only compares: every
+dashboard and every report of the year against what Superset returns now, without creating anything. It also says when a
+report is out of date because the data of its months changed after it was written. Both take the same
+`INGEST_MODE=direct WAREHOUSE=duckdb` as `make all`.
+
+- **Idempotent.** There is one chart per code and engine, shared by all the months; each dashboard fixes its month with a
+  filter. A rerun updates the same objects (a second run writes no chart), and never touches charts made by hand or the
+  other dashboards.
+- **Superset off or not ready.** The report is written anyway, and says that it was not compared with Superset yet and which
+  command does it. The pipeline waits for Superset if it is still starting (`SUPERSET_WAIT_SECONDS`, 900 by default).
+- **Months that are missing** are named, never filled in: the year dashboard lists the 12 months with their state, and only a
+  month with both years loaded gets a dashboard.
+- **Cost in cloud mode.** The evidence tables are rebuilt from the monthly aggregates (a few thousand rows), and the
+  verification sends 71 small queries to the warehouse of Superset. They have not been measured on Snowflake yet;
+  `make finops` shows the credits per warehouse.
+
 ---
 
 ## 13. FinOps (Snowflake and dbt)
@@ -844,7 +934,7 @@ user. It reports:
 
 ## 14. Tests
 
-`make test` runs 86 tests on synthetic data, with no cloud account needed (the 2009-2010 schema test
+`make test` runs 140 tests on synthetic data, with no cloud account needed (the 2009-2010 schema test
 installs DuckDB's spatial extension the first time, and is skipped without network). Besides the
 groups below:
 - `tests/test_stack.py` checks the two-command run: the Dagster history goes to the Postgres of
@@ -872,8 +962,21 @@ groups below:
   and writes a whole report from it: `results/2025/RESULTS_02.md` with the local-mode command, six
   interpretations and the quality section, the numbers in Spanish format, the calendar effect of
   28 vs 29 days, the fare above US$ 500 named, Flex Fare appearing in 2025, the CBD toll missing in
-  2024 and the warehouse fallback when there is no control database. It also checks the number
-  formats, one file per calendar month and that the README block is replaced only between its markers.
+  2024 and the warehouse fallback when there is no quality report. It also checks the number
+  formats, one file per calendar month, that the README block is replaced only between its markers, that every
+  block cites its charts, that a rerun replaces only its month, that a report that does not reconcile with the
+  evidence is not written, and the months that cannot be compared (not published, in the future, without a previous
+  year or not loaded): they say so, have no figures and never replace a report that has them. `make all-year` goes on
+  after a month that cannot run.
+- `tests/test_evidencia.py` renders the real dbt models of the aggregates and the evidence on that small warehouse
+  (`tests/synthetic.py`) and checks the chart catalog (every chart reads columns that exist, every citation is a chart of
+  the dashboard), that dbt and Python share their thresholds, the 12 months of the coverage, the figures against the trips,
+  the parser of Spanish numbers, that the audit finds an altered figure and a block without charts, and that the loader
+  publishes the quality reports (and those of months loaded by an earlier version) and replaces them by month.
+- `tests/test_respaldo.py` builds the evidence dashboards on a Superset double that answers the charts with real queries: the
+  dashboards match the report, a second run creates and changes nothing, each dashboard is fixed to its month, the
+  conclusions are next to their charts, a wrong value, a missing chart or a report out of date are reported, local and cloud
+  dashboards live side by side (with Snowflake's uppercase columns) and Superset off leaves the report marked as pending.
 - `tests/test_config.py` checks the portable paths (`~`, relative and absolute).
 - `tests/test_observability.py` checks that a step's run metrics do not wipe its quality metrics in
   the Pushgateway.
@@ -937,6 +1040,11 @@ Notes on the table:
   sum of the steps is Dagster's per-run overhead: one run per month plus zones and dbt.
 - **Snowflake times** (PUT/COPY, dbt on an X-Small) are not measured here. `make finops` reports
   them after the first cloud run.
+- **Evidence and its verification** (rerun of `MES=2026-09`, with 33 months in the warehouse): questions and
+  report 0.5 s, the seven English dashboards 38 s, and the 10 evidence dashboards of the year, with their 71 charts
+  read back from Superset and compared, 47 s. The first build of the monthly aggregates, over the 118M trips of the
+  33 months, took 28 s; afterwards each run only reads its two months. dbt took 204 s in that run (its tests read the
+  118M trips).
 
 ### Laptops with 8 GB of RAM (Windows, macOS, Linux)
 
@@ -998,7 +1106,15 @@ Then show:
   conservative and documented.
 - **Scope:** each run processes the assigned month and its comparison month. The warehouse keeps
   every month processed so far (each run replaces only its two months), and `results/` keeps one
-  report per calendar month: a later run of the same month (another year) replaces its file.
+  report per month and year: a later run of the same `MES` replaces its file, in any mode. The evidence
+  dashboards of the year show the months that are loaded; `make all-year` loads the rest.
+- **Evidence in cloud mode:** the evidence models, the reports and the evidence dashboards were run and verified end to end
+  in local mode. Their SQL uses the same constructs as the models that already ran on Snowflake, it parses with the
+  Snowflake dialect, and the tests cover the uppercase columns, but the first cloud run with them is still to be done.
+  The reports committed in `results/` were generated in local mode, so their links open the `local` dashboards.
+- **What the audit proves:** that every number of a report is shown, with its rounding, by the charts its block cites. A number
+  that is also in another cell of those charts is listed with how many cells have it. Words ("casi triplica") are backed by the
+  figures next to them, and the counts written with words are compared with the evidence.
 - **2009-2010 zones:** those files have coordinates, not zone ids. The zone comes from the official
   polygons with the coordinates rounded to 4 decimals (about 11 m), so a pickup within a few meters of
   a zone border can land in the neighbouring zone. Points without coordinates go to 264 (Unknown).

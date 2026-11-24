@@ -7,7 +7,10 @@ updated, so it can run again safely (`make superset-dashboards` runs it alone). 
              WAREHOUSE=duckdb    -> an offline copy of the marts (<DATA_DIR>/bi/nyc_taxi_bi.duckdb)
   datasets   virtual SQL datasets on marts.fact_trips / agg_zone_hour / dim_zone / dim_date
   dashboards Executive Overview, Demand Patterns, Pickup Zones, Congestion Relief Zone,
-             Payments & Tips, Airports
+             Payments & Tips, Airports, Data Quality & Quarantine
+
+These follow the last command. The dashboards that back each report of results/ (one per month, kept for
+every month) are built by src/respaldo.py, which this command also runs.
 
     python -m src.dashboards --mes 2025-01
 """
@@ -40,6 +43,15 @@ def superset_url() -> str:
     """SUPERSET_URL, or http://localhost:<SUPERSET_PORT> (the port docker compose publishes, 8090 by default)."""
     port = os.environ.get("SUPERSET_PORT", "").strip()
     return os.environ.get("SUPERSET_URL", "").strip() or (f"http://localhost:{port}" if port else DEFAULT_URL)
+
+
+def superset_public_url() -> str:
+    """Superset's address for a browser on this computer (the links of the reports). Inside the pipeline container
+    SUPERSET_URL is the service name (http://superset:8088), which a browser cannot open."""
+    url = superset_url()
+    if urlparse(url).hostname == "superset":
+        return f"http://localhost:{os.environ.get('SUPERSET_PORT', '').strip() or '8090'}"
+    return url.rstrip("/")
 
 
 def superset_expected() -> bool:
@@ -84,21 +96,35 @@ class SupersetAPI:
                                f"HTTP {response.status_code} {response.text[:500]}")
         return response.json() if response.content else {}
 
-    def find(self, resource: str, field: str, value: str) -> int | None:
-        page = 0
+    def list_all(self, resource: str) -> list[dict[str, Any]]:
+        """Every object of a resource (the API answers pages of 100)."""
+        items: list[dict[str, Any]] = []
         while True:
-            body = self._ok(self.http.get(f"/api/v1/{resource}/", params={"q": f"(page:{page},page_size:100)"}))
-            for item in body.get("result", []):
-                if item.get(field) == value:
-                    return item["id"]
-            if (page + 1) * 100 >= body.get("count", 0):
-                return None
-            page += 1
+            body = self._ok(self.http.get(f"/api/v1/{resource}/", params={"q": f"(page:{len(items) // 100},page_size:100)"}))
+            items += body.get("result", [])
+            if not body.get("result") or len(items) >= body.get("count", 0):
+                return items
+
+    def _index(self, resource: str, field: str) -> dict[Any, int]:
+        """Value of the field -> id, read once per run: listing every chart again for each chart took minutes once
+        there were more than a hundred of them."""
+        indexes = self.__dict__.setdefault("_indexes", {})
+        if (resource, field) not in indexes:
+            found: dict[Any, int] = {}
+            for item in self.list_all(resource):
+                found.setdefault(item.get(field), item["id"])
+            indexes[resource, field] = found
+        return indexes[resource, field]
+
+    def find(self, resource: str, field: str, value: str) -> int | None:
+        return self._index(resource, field).get(value)
 
     def upsert(self, resource: str, field: str, payload: dict[str, Any], update: dict[str, Any] | None = None) -> int:
         existing = self.find(resource, field, payload[field])
         if existing is None:
-            return self._ok(self.http.post(f"/api/v1/{resource}/", json=payload))["id"]
+            created = self._ok(self.http.post(f"/api/v1/{resource}/", json=payload))["id"]
+            self._index(resource, field)[payload[field]] = created
+            return created
         self._ok(self.http.put(f"/api/v1/{resource}/{existing}", json=update if update is not None else payload))
         return existing
 
@@ -117,8 +143,11 @@ class SupersetAPI:
         whose name has a period label are removed: a chart someone added by hand is left alone."""
         charts = self._ok(self.http.get(f"/api/v1/dashboard/{dashboard_id}/charts")).get("result", [])
         stale = [c["id"] for c in charts if c["id"] not in keep and PERIOD_LABEL.search(c.get("slice_name") or "")]
+        names = self._index("chart", "slice_name")
         for chart_id in stale:
             self._ok(self.http.delete(f"/api/v1/chart/{chart_id}"))
+            for name in [n for n, i in names.items() if i == chart_id]:
+                del names[name]
         return len(stale)
 
     def refresh_dataset(self, dataset_id: int) -> None:
@@ -203,9 +232,11 @@ def export_bi_copy(settings: Settings, month: Month | None = None) -> Path:
     return target
 
 
-def database_payload(settings: Settings, month: Month | None = None) -> tuple[dict[str, Any], str]:
+def database_payload(settings: Settings, month: Month | None = None, export: bool = True) -> tuple[dict[str, Any], str]:
+    """Superset connection of this warehouse. export=False reuses the offline BI copy that this run already wrote."""
     if settings.warehouse == "duckdb":
-        export_bi_copy(settings, month)
+        if export or not (settings.data_dir / "bi" / "nyc_taxi_bi.duckdb").exists():
+            export_bi_copy(settings, month)
         return {
             "database_name": "NYC Taxi (DuckDB offline copy)",
             "sqlalchemy_uri": "duckdb:////app/data/bi/nyc_taxi_bi.duckdb",
@@ -714,8 +745,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mes", required=True)
     args = parser.parse_args(argv)
-    build(Settings.from_env(), Month.parse(args.mes))
-    return 0
+    settings, month = Settings.from_env(), Month.parse(args.mes)
+    build(settings, month)
+    # The evidence dashboards of the reports, on the BI copy that build() has just refreshed, and their verification.
+    from src import respaldo
+
+    summary = respaldo.build(settings, month, exportar=False)
+    print(f"Evidence dashboards: {summary['verificacion']}")
+    for difference in summary["diferencias"]:
+        print(f"DIFFERENCE  {difference}", file=sys.stderr)
+    return 0 if summary["ok"] else 1
 
 
 if __name__ == "__main__":

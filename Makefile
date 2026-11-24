@@ -3,7 +3,9 @@
 #
 #   docker compose up -d          Dagster UI, Grafana, Prometheus, Loki, Dozzle, Superset (or: make up)
 #   make all MES=2025-01          cloud: ingest -> schema -> quality -> load -> dbt -> questions (results/2025/RESULTS_01.md) ->
-#                                 Superset dashboards, for MES and the same month of the previous year
+#                                 Superset dashboards, for MES and the same month of the previous year. Every figure of the
+#                                 report is backed by a Superset chart, and the run compares both
+#   make all-year MES=2025-01     the same for the 12 months of 2025, each one against the same month of 2024
 #   make all MES=2025-01 INGEST_MODE=direct WAREHOUSE=duckdb      the same, offline (no cloud account)
 #   make help                     list every target
 #
@@ -20,6 +22,8 @@
 export
 
 MES ?= 2025-01
+# Year of the 12-month targets (all-year, questions-year): the one of MES, or ANIO=2025
+ANIO ?= $(firstword $(subst -, ,$(MES)))
 
 # Virtual environment of the project. The pipeline container of docker compose sets VENV_DIR=/opt/venv
 # (built into its image from requirements.txt), so it never touches the .venv of the host.
@@ -60,8 +64,8 @@ export DBT_MONTHS = $(subst $(space),$(comma),$(strip $(MONTHS)))
 DBT_ARGS = --project-dir dbt_taxi --profiles-dir dbt_taxi
 
 .DEFAULT_GOAL := help
-.PHONY: help install all all-steps dagster-ui up down status superset-dashboards airbyte-setup airbyte-cancel airbyte-prune airbyte-sync schema \
-        quality load-sf dbt-run dbt-docs questions test explore demo-idempotency show-quarantine quality-report \
+.PHONY: help install all all-year all-steps dagster-ui up down status superset-dashboards verify-results airbyte-setup airbyte-cancel airbyte-prune airbyte-sync schema \
+        quality load-sf dbt-run dbt-docs questions questions-year test explore demo-idempotency show-quarantine quality-report \
         finops clean
 
 help: ## list targets
@@ -81,6 +85,9 @@ $(VENV): pyproject.toml
 all: $(VENV) ## full pipeline for MES and its comparison month, orchestrated by Dagster (lineage at http://localhost:3003)
 	$(PY) -m src.orchestration --mes $(MES)
 
+all-year: $(VENV) ## `make all` for the 12 months of the year of MES (or ANIO=2025); a month that is not published yet is reported and skipped
+	$(PY) -m src.orchestration --anio $(ANIO)
+
 all-steps: $(VENV) airbyte-sync schema quality load-sf dbt-run questions ## same pipeline, step by step without Dagster (debugging)
 	@echo "Pipeline finished for $(MONTHS) (run $(RUN_ID))"
 
@@ -97,8 +104,11 @@ status: $(VENV) ## is every UI reachable? If not, why (port taken or reserved by
 down: ## stop the docker compose stack (volumes are kept)
 	docker compose down
 
-superset-dashboards: $(VENV) ## create/update the Superset dashboards alone (make all already does it)
+superset-dashboards: $(VENV) ## create/update the Superset dashboards alone and compare them with the report of MES (make all already does it)
 	$(PY) -m src.dashboards --mes $(MES)
+
+verify-results: $(VENV) ## compare the reports of the year of MES, and their dashboards, with what Superset returns now (creates nothing)
+	$(PY) -m src.respaldo --mes $(MES) --verificar
 
 airbyte-setup: ## optional: create the Airbyte objects ahead of time (ingestion creates them automatically)
 	$(PY) -m src.ingesta_airbyte --setup --mes $(MES)
@@ -129,6 +139,9 @@ dbt-docs: ## generate dbt docs (lineage and model descriptions)
 
 questions: ## run sql/q1..q6 against the marts and write results/YYYY/RESULTS_MM.md (Spanish, interpreted from the numbers)
 	$(PY) -m src.resultados --mes $(MES)
+
+questions-year: $(VENV) ## the same for every month of the year of MES (or ANIO=2025) that can be compared with what is loaded
+	$(PY) -m src.resultados --anio $(ANIO)
 
 test: $(VENV) ## pytest on synthetic data (no cloud account needed)
 	$(PY) -m pytest

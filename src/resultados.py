@@ -14,21 +14,41 @@ interpretations are not static text: src/interpretacion.py writes them from the 
 the context queries of sql/contexto/ and the schema and quality reports (what each Parquet file
 brought, what was converted and what went to quarantine and why).
 
-    python -m src.resultados --mes 2025-01
+Every figure is backed by a Superset chart (src/evidencia.py): each block of the report ends with links to
+the charts that show its figures, the answers of q1..q6 are reconciled with the evidence tables
+(marts.ev_*) that those charts read, and every number of the text is looked up in the charts its block
+cites. A month that cannot be compared (its data or the data of the year before is missing) gets a report
+that says so, without figures or conclusions, and never replaces a report that has them.
+
+    python -m src.resultados --mes 2025-01      # one month
+    python -m src.resultados --anio 2025        # every month of 2025 that can be compared with what is loaded
 """
 from __future__ import annotations
 
 import argparse
 import re
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from string import Template
 from typing import Any
 
+from src import evidencia as ev
 from src import interpretacion as interp
-from src.config import ROOT, RUN_ID, SQL_DIR, Month, Settings, connect_duckdb_file, get_logger, track_step
+from src.config import (
+    FIRST_TLC_MONTH,
+    ROOT,
+    RUN_ID,
+    SQL_DIR,
+    Month,
+    Settings,
+    connect_duckdb_file,
+    get_logger,
+    track_step,
+)
+from src.dashboards import superset_public_url
 
 log = get_logger("resultados")
 RESULTS_DIR = ROOT / "results"
@@ -160,10 +180,19 @@ def command_for(settings: Settings, month: Month) -> tuple[str, str]:
 
 
 def build(settings: Settings, month: Month, results: list[dict[str, Any]], analysis: interp.Analisis,
-          notes: dict[int, str], link_prefix: str = "") -> str:
-    """The Spanish report of one comparison (results/YYYY/RESULTS_MM.md, whose links climb two folders)."""
+          notes: dict[int, str], evidence: ev.Evidencia, link_prefix: str = "", base_url: str = "") -> tuple[str, list[ev.Cifra], list[str]]:
+    """The Spanish report of one comparison (results/YYYY/RESULTS_MM.md, whose links climb two folders), its audited
+    figures and the differences between the text and the evidence (none, unless something is wrong)."""
     command, mode = command_for(settings, month)
     engine = "Snowflake" if settings.warehouse == "snowflake" else "DuckDB"
+    slug, slug_year = ev.slug_mes(settings, month), ev.slug_anio(settings, month.year)
+
+    def cite(key: str) -> list[str]:
+        return ["", ev.cita(key), ""]
+
+    def cite_item(key: str) -> str:  # a list item keeps its evidence as a nested item
+        return f"  - _Respaldo:_ {ev.citas(key)}"
+
     files = []
     for year in (analysis.A, analysis.B):
         quality = analysis.quality.get(year)
@@ -173,26 +202,30 @@ def build(settings: Settings, month: Month, results: list[dict[str, Any]], analy
         f"# Resultados: {analysis.mes_a} vs {analysis.mes_b}",
         "",
         f"> {interp.resumen(analysis)}",
-        "",
+        *cite("resumen"),
         "| | |",
         "|---|---|",
         f"| Comando | `{command}` |",
         f"| Modo | {mode} |",
         f"| Consultas | marts de dbt en {engine} |",
         f"| Archivos de la TLC | {' y '.join(files)} |",
+        f"| Tablero de respaldo | [`{slug}`]({ev.url_tablero(base_url, slug)}) en Superset |",
+        f"| Los 12 meses del año | [`{slug_year}`]({ev.url_tablero(base_url, slug_year)}) en Superset |",
         f"| Corrida | `{RUN_ID}`, {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC |",
         "",
         "Las interpretaciones no son texto fijo: `src/interpretacion.py` las redacta en cada corrida a partir de los "
         "resultados de las consultas, de las consultas de contexto (`sql/contexto/`) y de los reportes de esquema y de "
         f"calidad de cada archivo. Los montos están en dólares; las tarifas mayores a US$ {interp.FARE_CAP} se señalan "
-        "como atípicas porque ninguna regla de calidad les pone un tope.",
+        "como atípicas porque ninguna regla de calidad les pone un tope. Cada bloque termina con los charts de Superset que "
+        "muestran sus cifras; la última sección dice cómo se comprobó.",
         "",
         "## Calidad de los datos y cuarentena",
         "",
-        *interp.calidad_seccion(analysis),
-        "",
     ]
+    for key, lines in interp.calidad_bloques(analysis):
+        parts += [*lines, *(cite(key) if key else [""])]
     for r in results:
+        key = f"q{r['index']}"
         parts += [
             f"## {r['index']}. {TITULOS.get(r['index'], r['title'])}",
             "",
@@ -207,12 +240,23 @@ def build(settings: Settings, month: Month, results: list[dict[str, Any]], analy
             "</details>",
             "",
             markdown_table(r["columns"], r["rows"], locale="es"),
-            "",
-            note_markdown(notes.get(r["index"])),
-            "",
+            *cite(f"{key}_tabla"),
         ]
-    parts += ["## Conclusiones", "", *[f"- {line}" for line in interp.conclusiones(analysis, command)], ""]
-    return "\n".join(parts)
+        if r["index"] == 6:  # one evidence per line of the interpretation
+            parts += ["**Interpretación:**", ""]
+            for line_key, text in interp.q6_lineas(analysis):
+                parts += [f"- {text}", cite_item(line_key)]
+            parts.append("")
+        else:
+            parts += [note_markdown(notes.get(r["index"])), *cite(key)]
+    parts += ["## Conclusiones", ""]
+    for key, text in interp.conclusiones(analysis, command):
+        parts += [f"- {text}", cite_item(key)]
+    body = "\n".join([*parts, ""])
+    figures = ev.auditar(body, evidence)
+    warnings = ev.contrastes(analysis.conteos(), evidence)
+    body += "\n" + "\n".join(ev.seccion_respaldo(settings, month, base_url, figures, warnings))
+    return body, figures, warnings
 
 
 def results_index(results_dir: Path = RESULTS_DIR) -> dict[str, list[str]]:
@@ -236,9 +280,10 @@ def readme_block(settings: Settings, month: Month, results: list[dict[str, Any]]
         README_START,
         "",
         f"Assigned month **{month.label}** vs **{month.comparison.label}**, from the dbt marts in {engine} "
-        f"(`{command}`, run `{RUN_ID}`, {datetime.now(timezone.utc):%Y-%m-%d}). The full report, with the SQL and the "
-        f"data quality and quarantine section, is [results/{month.year}/{target.name}]"
-        f"(results/{month.year}/{target.name}). The "
+        f"(`{command}`, run `{RUN_ID}`, {datetime.now(timezone.utc):%Y-%m-%d}). The full report, with the SQL, the "
+        f"data quality and quarantine section and the Superset chart behind every figure, is "
+        f"[results/{month.year}/{target.name}](results/{month.year}/{target.name}). Its evidence dashboard in Superset is "
+        f"[`{ev.slug_mes(settings, month)}`]({ev.url_tablero(superset_public_url(), ev.slug_mes(settings, month))}). The "
         "interpretations are in Spanish and are written by `src/interpretacion.py` from the numbers of the run.",
         "",
     ]
@@ -252,7 +297,7 @@ def readme_block(settings: Settings, month: Month, results: list[dict[str, Any]]
     for r in results:
         parts += [f"#### Q{r['index']}. {r['title']}", "", markdown_table(r["columns"], r["rows"]), "",
                   note_markdown(notes.get(r["index"])), ""]
-    parts += ["#### Conclusiones", "", *[f"- {line}" for line in interp.conclusiones(analysis, command)], ""]
+    parts += ["#### Conclusiones", "", *[f"- {text}" for _, text in interp.conclusiones(analysis, command)], ""]
     parts.append(README_END)
     return "\n".join(parts)
 
@@ -274,27 +319,102 @@ def open_connection(settings: Settings) -> Any:
     return snowflake_connect(step="questions")
 
 
-def analyse(settings: Settings, month: Month, connection: Any) -> tuple[list[dict[str, Any]], interp.Analisis, dict[int, str]]:
-    """Questions, context and interpretations of one comparison."""
+def analyse(settings: Settings, month: Month, connection: Any
+            ) -> tuple[list[dict[str, Any]], interp.Analisis, dict[int, str], ev.Evidencia]:
+    """Questions, context, interpretations and evidence of one comparison."""
+    def run(sql: str) -> tuple[list[str], list[tuple]]:
+        return run_query(settings, sql, connection)
+
     results = collect(settings, month, connection)
-    data = interp.fetch_context(lambda sql: run_query(settings, sql, connection), month)
-    quality = {m.year: interp.quality_from_control(settings, m.label) for m in (month, month.comparison)}
-    analysis = interp.Analisis(settings, month, data, results, quality)
-    return results, analysis, interpret(analysis)
+    analysis = interp.Analisis(settings, month, interp.fetch_context(run, month), results)
+    return results, analysis, interpret(analysis), ev.leer(run, month)
 
 
-def write_results(settings: Settings, month: Month, readme: Path | None = README,
-                  results_dir: Path = RESULTS_DIR) -> Path:
-    """Writes results/YYYY/RESULTS_MM.md and the README block. Returns the results file."""
+# --- months without a comparison ---------------------------------------------------------------------------------
+SIN_DATOS = "<!-- SIN-DATOS: este reporte no tiene cifras; `make all` lo reemplaza cuando el mes se pueda comparar -->"
+
+
+@dataclass
+class Reporte:
+    """What was written: the file, its audited figures and the differences between the text and the evidence."""
+
+    path: Path
+    cifras: list[ev.Cifra] = field(default_factory=list)
+    avisos: list[str] = field(default_factory=list)
+    disponible: bool = True
+
+    @property
+    def sin_respaldo(self) -> list[ev.Cifra]:
+        return [c for c in self.cifras if not c.respaldada]
+
+
+def has_figures(path: Path) -> bool:
+    return path.exists() and SIN_DATOS not in path.read_text(encoding="utf-8")
+
+
+def write_unavailable(settings: Settings, month: Month, reason: str, results_dir: Path = RESULTS_DIR) -> Reporte:
+    """The report of a month that cannot be compared: it says why, with no figures and no conclusions. A report that
+    already has figures is left as it is."""
+    target = results_file(month, results_dir)
+    if has_figures(target):
+        log.warning("%s not modified: it has the figures of an earlier run, and now %s", target.name, reason)
+        return Reporte(target, disponible=False)
+    command, _ = command_for(settings, month)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join([
+        f"# Resultados: {interp.mes_es(month)} vs {interp.mes_es(month.comparison)} (sin datos)",
+        "",
+        SIN_DATOS,
+        "",
+        f"> Sin comparación: {reason}.",
+        "",
+        "Este reporte no tiene cifras, interpretaciones ni conclusiones, y no hay tablero de respaldo de este mes: no se estima ni se "
+        "completa ningún dato." + ("" if month.comparison < FIRST_TLC_MONTH else
+                                   f" Cuando los dos meses estén disponibles, `{command}` lo reemplaza por la comparación completa."),
+        "",
+        f"Intento: corrida `{RUN_ID}`, {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC.",
+        "",
+    ]), encoding="utf-8")
+    log.warning("%s: %s", target, reason)
+    return Reporte(target, disponible=False)
+
+
+def missing_reason(run: ev.Query, month: Month) -> str | None:
+    """Why this month cannot be compared with what is loaded in the warehouse (None = it can)."""
+    if month in ev.meses_comparables(run):
+        return None
+    _, rows = run("select year, month from marts.agg_month_profile")
+    loaded = {(int(y), int(m)) for y, m in rows}
+    missing = [m for m in (month, month.comparison) if (m.year, m.month) not in loaded]
+    return f"no hay viajes aceptados de {interp.lista([interp.mes_es(m) for m in missing])} en el warehouse"
+
+
+def write_report(settings: Settings, month: Month, readme: Path | None = README, results_dir: Path = RESULTS_DIR) -> Reporte:
+    """Writes results/YYYY/RESULTS_MM.md and the README block."""
     connection = open_connection(settings)
     try:
-        results, analysis, notes = analyse(settings, month, connection)
+        reason = missing_reason(lambda sql: run_query(settings, sql, connection), month)
+        if reason is not None:
+            return write_unavailable(settings, month, reason, results_dir)
+        results, analysis, notes, evidence = analyse(settings, month, connection)
     finally:
         connection.close()
+    problems = ev.reconciliar(results, evidence)
+    if problems:
+        raise ev.EvidenciaError(f"{month}: the answers of sql/q1..q6 and the evidence tables differ, the report is not written:\n  "
+                                + "\n  ".join(problems))
+    text, figures, warnings = build(settings, month, results, analysis, notes, evidence, link_prefix="../../",
+                                    base_url=superset_public_url())
     target = results_file(month, results_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(build(settings, month, results, analysis, notes, link_prefix="../../"), encoding="utf-8")
-    log.info("wrote %s", target)
+    target.write_text(text, encoding="utf-8")
+    report = Reporte(target, figures, warnings)
+    log.info("wrote %s: %d figures, %d without a chart that shows them", target, len(figures), len(report.sin_respaldo))
+    for figure in report.sin_respaldo:
+        log.warning("%s: %s (%s) is not shown by the charts its block cites (%s)", target.name, figure.texto, figure.seccion,
+                    ", ".join(figure.citados) or "none")
+    for warning in warnings:
+        log.warning("%s: %s", target.name, warning)
     if readme is not None and readme.exists():
         updated = replace_block(readme.read_text(encoding="utf-8"), readme_block(settings, month, results, analysis, notes, results_dir))
         if updated is None:
@@ -302,16 +422,42 @@ def write_results(settings: Settings, month: Month, readme: Path | None = README
         else:
             readme.write_text(updated, encoding="utf-8")
             log.info("updated the results section of %s", readme.name)
-    return target
+    return report
+
+
+def write_results(settings: Settings, month: Month, readme: Path | None = README, results_dir: Path = RESULTS_DIR) -> Path:
+    """Writes results/YYYY/RESULTS_MM.md and the README block. Returns the results file."""
+    return write_report(settings, month, readme, results_dir).path
+
+
+def comparable_months(settings: Settings, year: int) -> list[Month]:
+    """Months of the year whose comparison is complete in the warehouse."""
+    connection = open_connection(settings)
+    try:
+        return ev.meses_comparables(lambda sql: run_query(settings, sql, connection), year)
+    finally:
+        connection.close()
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--mes", required=True, help="assigned month YYYY-MM")
+    scope = parser.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--mes", help="assigned month YYYY-MM")
+    scope.add_argument("--anio", type=int, help="every month of this year that can be compared with what is loaded")
     args = parser.parse_args(argv)
     settings = Settings.from_env()
-    with track_step(settings, "questions", args.mes):
-        write_results(settings, Month.parse(args.mes))
+    if args.mes:
+        with track_step(settings, "questions", args.mes):
+            write_report(settings, Month.parse(args.mes))
+        return 0
+    months = comparable_months(settings, args.anio)
+    if not months:
+        print(f"No month of {args.anio} can be compared with what is loaded in the warehouse: run `make all MES={args.anio}-01` first.",
+              file=sys.stderr)
+        return 1
+    for month in months:
+        with track_step(settings, "questions", month.label):
+            write_report(settings, month, readme=README if month == months[-1] else None)
     return 0
 
 
