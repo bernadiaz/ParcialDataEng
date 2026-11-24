@@ -184,11 +184,46 @@ def filtro_nativo(nombre: str, columna: str, valor: Any, dataset_id: int, charts
     }
 
 
-def encabezado_mes(settings: Settings, mes: Month, evidencia: Evidencia, reporte: Path) -> str:
+@dataclass
+class EstadoReporte:
+    """Qué dice results/YYYY/RESULTS_MM.md de un mes, comparado con la evidencia de ahora en este warehouse."""
+
+    mes: Month
+    existe: bool = False
+    motor: str | None = None   # dónde se escribió: local, nube o None (anterior a los tableros de respaldo)
+    cifras: int = 0
+    sin_respaldo: int = 0
+
+    @property
+    def coincide(self) -> bool:
+        """Todas las cifras del reporte son las de este warehouse (se haya escrito en este modo o en el otro)."""
+        return self.existe and self.motor is not None and self.cifras > 0 and self.sin_respaldo == 0
+
+    def texto(self, motor: str) -> str:
+        if not self.existe:
+            return "sin generar"
+        if self.motor is None:
+            return "anterior a los tableros de respaldo: volver a correr el mes"
+        otro = f", escrito en modo {self.motor}" if self.motor != motor else ""
+        if self.sin_respaldo:
+            return f"desactualizado ({self.sin_respaldo} de {self.cifras} cifras no son las de estos datos{otro}): volver a correr el mes"
+        return f"al día ({self.cifras} cifras, todas en el tablero{otro})"
+
+
+def estado_reporte(mes: Month, evidencia: Evidencia | None) -> EstadoReporte:
+    path = resultados.results_file(mes)
+    if not resultados.has_figures(path):
+        return EstadoReporte(mes)
+    cifras = ev.auditar(path.read_text(encoding="utf-8"), evidencia) if evidencia is not None and evidencia.existe else []
+    return EstadoReporte(mes, True, ev.motor_de(path), len(cifras), sum(not c.respaldada for c in cifras))
+
+
+def encabezado_mes(settings: Settings, mes: Month, evidencia: Evidencia, reporte: EstadoReporte) -> str:
     viajes, recaudacion = evidencia.indicador("viajes"), evidencia.indicador("recaudacion")
-    anio = ev.slug_anio(settings, mes.year)
-    estado = (f"Sustenta `results/{mes.year}/{reporte.name}`" if resultados.has_figures(reporte) and ev.motor_de(reporte) == ev.motor(settings)
-              else f"El reporte `results/{mes.year}/{reporte.name}` de este modo todavía no se generó (`make all {ev.argumentos_make(settings, mes)}`)")
+    anio, archivo = ev.slug_anio(settings, mes.year), f"`results/{mes.year}/{resultados.results_file(mes).name}`"
+    estado = (f"Sustenta {archivo}" if reporte.coincide and reporte.motor == ev.motor(settings) else
+              f"Sustenta {archivo}, que se escribió en modo {reporte.motor}: sus {reporte.cifras} cifras son las de estos datos" if reporte.coincide else
+              f"El reporte {archivo} todavía no se generó con estos datos (`make all {ev.argumentos_make(settings, mes)}`)")
     return (
         f"### {mes_es(mes).capitalize()} contra {mes_es(mes.comparison)}: {signo(viajes['variacion_pct'])} de viajes, "
         f"{signo(recaudacion['variacion_pct'])} de recaudación\n"
@@ -198,12 +233,13 @@ def encabezado_mes(settings: Settings, mes: Month, evidencia: Evidencia, reporte
 
 
 def tablero_mes(settings: Settings, mes: Month, evidencia: Evidencia, ids: dict[str, int]) -> dict[str, Any]:
-    reporte = resultados.results_file(mes)
+    reporte = estado_reporte(mes, evidencia)
     titulo = f"Taxi NYC | Respaldo {mes_es(mes)} vs {mes_es(mes.comparison)} ({ev.motor(settings)})"
     p = Posicion(titulo)
     p.texto("GRID_ID", encabezado_mes(settings, mes, evidencia, reporte), 17)
     p.pestanas()
-    propias = ev.conclusiones_de(reporte) if resultados.has_figures(reporte) and ev.motor_de(reporte) == ev.motor(settings) else []
+    # Solo las conclusiones cuyas cifras son las de estos datos: al lado de otros charts no estarían respaldadas.
+    propias = ev.conclusiones_de(resultados.results_file(mes)) if reporte.coincide else []
     for clave, nombre in ev.PESTANAS:
         tab = p.pestana(clave, nombre)
         graficos = [g for g in ev.CATALOGO if g.pestana == clave]
@@ -219,34 +255,6 @@ def tablero_mes(settings: Settings, mes: Month, evidencia: Evidencia, ids: dict[
             p.charts(tab, [g for g in graficos if g.codigo.split(".")[0] == grupo], ids)
     return {"slug": ev.slug_mes(settings, mes), "titulo": titulo, "posicion": p.pos, "colores": {mes.label: ASSIGNED_COLOR,
             mes.comparison.label: COMPARISON_COLOR}, "filtro": ("Mes del reporte", "mes", mes.label), "graficos": ev.CATALOGO}
-
-
-@dataclass
-class EstadoReporte:
-    """Qué dice results/YYYY/RESULTS_MM.md de un mes, comparado con la evidencia de ahora."""
-
-    mes: Month
-    existe: bool = False
-    motor: str | None = None
-    cifras: int = 0
-    sin_respaldo: int = 0
-
-    def texto(self, motor: str) -> str:
-        if not self.existe:
-            return "sin generar"
-        if self.motor != motor:
-            return f"generado en modo {self.motor or 'anterior a los tableros de respaldo'}"
-        if self.sin_respaldo:
-            return f"desactualizado ({self.sin_respaldo} de {self.cifras} cifras cambiaron): volver a correr el mes"
-        return f"al día ({self.cifras} cifras, todas en el tablero)"
-
-
-def estado_reporte(mes: Month, evidencia: Evidencia | None) -> EstadoReporte:
-    path = resultados.results_file(mes)
-    if not resultados.has_figures(path):
-        return EstadoReporte(mes)
-    cifras = ev.auditar(path.read_text(encoding="utf-8"), evidencia) if evidencia is not None and evidencia.existe else []
-    return EstadoReporte(mes, True, ev.motor_de(path), len(cifras), sum(not c.respaldada for c in cifras))
 
 
 def encabezado_anio(settings: Settings, anio: int, completo: Evidencia, por_mes: dict[str, Evidencia]) -> str:

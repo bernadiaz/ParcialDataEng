@@ -135,6 +135,11 @@ def _slugs(fake: FakeSuperset) -> list[str]:
     return sorted(d["slug"] for d in fake.objects["dashboard"].values())
 
 
+def _markdown(fake: FakeSuperset, slug: str) -> list[str]:
+    position = json.loads(fake.dashboard(slug)["position_json"])
+    return [v["meta"]["code"] for v in position.values() if isinstance(v, dict) and v.get("type") == "MARKDOWN"]
+
+
 def _report(settings, superset):
     return resultados.write_report(settings, FEB, readme=None, results_dir=superset.results).path
 
@@ -274,10 +279,23 @@ def test_local_and_cloud_dashboards_live_side_by_side(settings, superset, monkey
     assert params["all_columns"][0] == "PUESTO_MES" and params["conditional_formatting"][0]["column"].isupper()
     mask = json.loads(superset.dashboard("respaldo-nube-2025-02")["json_metadata"])["native_filter_configuration"][0]["defaultDataMask"]
     assert mask["extraFormData"]["filters"][0]["col"] == "MES"
-    # the report in results/ is the local one: the cloud run does not sign its verification
-    assert "`respaldo-local-2025-02`" in ev.estado_verificacion(resultados.results_file(FEB)) or "coincide" in ev.estado_verificacion(
-        resultados.results_file(FEB))
+    # the report in results/ is the local one: the cloud run does not sign its verification, but its figures are the ones
+    # of the cloud too, so the cloud dashboard shows its conclusions and says where it was written
     assert "respaldo-nube" not in resultados.results_file(FEB).read_text(encoding="utf-8")
+    texts = _markdown(superset, "respaldo-nube-2025-02")
+    assert any("se escribió en modo local" in t for t in texts)
+    assert any(t.startswith("**Conclusión 1.** La demanda") for t in texts)
+    assert "escrito en modo local" in _markdown(superset, "respaldo-nube-2025")[0]
+
+
+def test_conclusions_that_are_not_those_of_the_data_are_not_shown(settings, superset):
+    path = _report(settings, superset)
+    path.write_text(path.read_text(encoding="utf-8").replace("+20,0 % de viajes", "+21,0 % de viajes"), encoding="utf-8")
+    respaldo.build(settings, FEB)
+    texts = _markdown(superset, "respaldo-local-2025-02")
+    assert any("todavía no se generó con estos datos" in t for t in texts)
+    assert not any("La demanda de taxis amarillos" in t for t in texts)
+    assert "desactualizado" in _markdown(superset, "respaldo-local-2025")[0]
 
 
 def test_charts_made_by_hand_and_the_other_dashboards_are_left_alone(settings, superset):
