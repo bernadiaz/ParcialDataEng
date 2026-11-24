@@ -1,0 +1,48 @@
+# No secrets here: every value comes from environment variables (.env, exported by the Makefile).
+# Targets:
+#   snowflake_browser  personal user, SSO in the browser (SNOWFLAKE_AUTHENTICATOR=externalbrowser)
+#   snowflake_keypair  service user with a key pair (SNOWFLAKE_PRIVATE_KEY_PATH)
+#   duckdb             offline validation on data/warehouse/nyc_taxi.duckdb (WAREHOUSE=duckdb)
+nyc_taxi:
+  target: "{{ env_var('DBT_TARGET', 'snowflake_browser') }}"
+  outputs:
+    snowflake_browser:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT', '') }}"
+      user: "{{ env_var('SNOWFLAKE_USER', '') }}"
+      authenticator: "{{ env_var('SNOWFLAKE_AUTHENTICATOR', 'externalbrowser') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE', 'TAXI_PIPELINE') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'WH_TAXI_DEV') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE', 'NYC_TAXI') }}"
+      schema: STAGING
+      threads: 4
+      client_session_keep_alive: false
+      reuse_connections: true
+      query_tag: "project=nyc_taxi;env={{ env_var('COST_ENV', 'dev') }};owner={{ env_var('COST_OWNER', 'unknown') }};step=dbt"
+    snowflake_keypair:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT', '') }}"
+      user: "{{ env_var('SNOWFLAKE_USER', '') }}"
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH', '') }}"
+      private_key_passphrase: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PASSPHRASE', '') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE', 'TAXI_PIPELINE') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'WH_TAXI_RUN') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE', 'NYC_TAXI') }}"
+      schema: STAGING
+      threads: 4
+      client_session_keep_alive: false
+      reuse_connections: true
+      query_tag: "project=nyc_taxi;env={{ env_var('COST_ENV', 'exam') }};owner={{ env_var('COST_OWNER', 'unknown') }};step=dbt"
+    duckdb:
+      type: duckdb
+      path: "{{ env_var('DUCKDB_WAREHOUSE_PATH', 'data/warehouse/nyc_taxi.duckdb') }}"
+      schema: staging
+      threads: 4
+      # Same memory budget as the rest of the pipeline (src/config.py resolves DUCKDB_MEMORY_LIMIT=auto
+      # to a quarter of the RAM): without it DuckDB would take 80% of the RAM of an 8 GB laptop. It
+      # spills to nyc_taxi.duckdb.tmp next to the warehouse file. temp_directory is not set here:
+      # dbt-duckdb applies settings on every connection, and DuckDB refuses to change it once used.
+      settings:
+        memory_limit: "{{ env_var('DUCKDB_MEMORY_LIMIT', '2GB') }}"
+        threads: "{{ env_var('DUCKDB_THREADS', '4') }}"
+        preserve_insertion_order: false

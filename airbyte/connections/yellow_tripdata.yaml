@@ -1,0 +1,45 @@
+# Versioned Airbyte configuration for the monthly yellow taxi file (no secrets: {env.*} comes from .env).
+# src/ingesta_airbyte.py fills {year}, {month}, {mes} and {env.NAME} before every sync. Airbyte's
+# own variables like ${STREAM_NAME} are left untouched.
+name: nyc-taxi-yellow-monthly
+
+source:
+  name: tlc-yellow-tripdata
+  # Airbyte "File (CSV, JSON, Excel, Feather, Parquet)" source over HTTPS (public TLC CDN, no credentials)
+  configuration:
+    sourceType: file
+    dataset_name: yellow_tripdata
+    format: parquet
+    url: "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_{mes}.parquet"
+    provider:
+      storage: HTTPS
+      user_agent: false
+
+destination:
+  name: s3-raw-yellow
+  configuration:
+    destinationType: s3
+    s3_bucket_name: "{env.S3_BUCKET}"
+    s3_bucket_region: "{env.AWS_REGION}"
+    # Hive-style landing path. The wrapper sets the month before each sync. Full refresh overwrite
+    # replaces only this path, so the other months are untouched.
+    s3_bucket_path: "{env.S3_RAW_PREFIX}/yellow/year={year}/month={month}"
+    s3_path_format: "${STREAM_NAME}/"
+    access_key_id: "{env.AIRBYTE_S3_ACCESS_KEY_ID}"
+    secret_access_key: "{env.AIRBYTE_S3_SECRET_ACCESS_KEY}"
+    format:
+      format_type: Parquet
+      compression_codec: SNAPPY
+
+connection:
+  name: nyc-taxi-yellow-monthly
+  stream: yellow_tripdata
+  sync_mode: full_refresh_overwrite
+  # Job pod resources (Airbyte's default limit is 4Gi per container). The File source loads the whole
+  # month into pandas and goes over 4Gi with 3.5M rows. The pipeline applies these values through
+  # the Airbyte config API before every sync. Requests stay low, so the pod still schedules.
+  resources:
+    cpu_request: "0.5"
+    cpu_limit: "2"
+    memory_request: 1Gi
+    memory_limit: 7Gi

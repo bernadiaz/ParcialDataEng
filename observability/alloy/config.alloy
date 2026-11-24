@@ -1,0 +1,69 @@
+// Grafana Alloy: ships logs to Loki (Promtail is deprecated).
+
+// 1) Pipeline JSON log lines written on the host by src/config.py (data/logs/pipeline.jsonl).
+local.file_match "pipeline" {
+  path_targets = [{"__path__" = "/var/log/nyc-taxi/*.jsonl", "service" = "nyc-taxi-pipeline", "source" = "file"}]
+}
+
+loki.source.file "pipeline" {
+  targets    = local.file_match.pipeline.targets
+  forward_to = [loki.process.pipeline.receiver]
+}
+
+loki.process "pipeline" {
+  stage.json {
+    expressions = {level = "level", logger = "logger", run_id = "run_id", ts = "ts"}
+  }
+
+  stage.labels {
+    values = {level = "", logger = ""}
+  }
+
+  stage.timestamp {
+    source = "ts"
+    format = "RFC3339"
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+// 2) stdout/stderr of this compose project's containers (Superset, Grafana, Prometheus, ...), like Dozzle but stored.
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "containers" {
+  targets = []
+
+  // only this project: other local stacks keep their own logging
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    regex         = "nyc-taxi"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+}
+
+loki.source.docker "containers" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.containers.targets
+  labels        = {"source" = "docker"}
+  relabel_rules = discovery.relabel.containers.rules
+  forward_to    = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

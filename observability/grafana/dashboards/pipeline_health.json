@@ -1,0 +1,88 @@
+{
+  "uid": "nyc-taxi-pipeline",
+  "title": "NYC Taxi - Pipeline Health & Logs",
+  "description": "Last run of every pipeline step (Pushgateway -> Prometheus) and pipeline logs (Alloy -> Loki).",
+  "tags": ["nyc-taxi", "pipeline"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "editable": false,
+  "refresh": "30s",
+  "time": {"from": "now-24h", "to": "now"},
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Last run status by step and month",
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "nyc_taxi_step_success", "legendFormat": "{{step}} {{mes}}", "instant": true}],
+      "fieldConfig": {"defaults": {
+        "mappings": [{"type": "value", "options": {"0": {"text": "FAILED", "color": "red"}, "1": {"text": "OK", "color": "green"}}}],
+        "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}
+      }, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "none", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 2, "type": "bargauge", "title": "Step duration (seconds)",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 6},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sort_desc(nyc_taxi_step_duration_seconds)", "legendFormat": "{{step}} {{mes}}", "instant": true}],
+      "fieldConfig": {"defaults": {"unit": "s", "decimals": 1, "color": {"mode": "continuous-BlYlRd"}}, "overrides": []},
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 3, "type": "bargauge", "title": "Peak RAM per step (MB) - laptop budget 8 GB",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 6},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sort_desc(nyc_taxi_step_peak_rss_megabytes)", "legendFormat": "{{step}} {{mes}}", "instant": true}],
+      "fieldConfig": {"defaults": {"unit": "decmbytes", "decimals": 0, "max": 8000,
+        "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 4000}, {"color": "red", "value": 6500}]}}, "overrides": []},
+      "options": {"orientation": "horizontal", "displayMode": "lcd", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 4, "type": "stat", "title": "Ingestion: rows landed and skipped re-downloads (hash matched)",
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 15},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "nyc_taxi_ingested_rows", "legendFormat": "rows {{dataset}} {{mes}}", "instant": true},
+        {"refId": "B", "expr": "nyc_taxi_ingestion_skipped", "legendFormat": "skipped {{dataset}} {{mes}}", "instant": true}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "fixed", "fixedColor": "blue"}}, "overrides": []},
+      "options": {"colorMode": "value", "graphMode": "none", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 5, "type": "stat", "title": "Warehouse load: rows loaded / replaced per month",
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 15},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "expr": "nyc_taxi_loaded_rows", "legendFormat": "loaded {{table}} {{mes}}", "instant": true},
+        {"refId": "B", "expr": "nyc_taxi_deleted_rows", "legendFormat": "replaced {{table}} {{mes}}", "instant": true}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "color": {"mode": "fixed", "fixedColor": "purple"}}, "overrides": []},
+      "options": {"colorMode": "value", "graphMode": "none", "textMode": "value_and_name", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Log lines per level (Loki)",
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 21},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [{"refId": "A", "expr": "sum by (level) (count_over_time({service=\"nyc-taxi-pipeline\"} [1m]))", "legendFormat": "{{level}}"}],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 60, "stacking": {"mode": "normal"}}}, "overrides": [
+        {"matcher": {"id": "byName", "options": "error"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]},
+        {"matcher": {"id": "byName", "options": "warning"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]}
+      ]},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 7, "type": "logs", "title": "Warnings and errors",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 28},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [{"refId": "A", "expr": "{service=\"nyc-taxi-pipeline\", level=~\"warning|error\"} | json | line_format \"{{.logger}} | {{.msg}} (run {{.run_id}})\""}],
+      "options": {"showTime": true, "wrapLogMessage": true, "sortOrder": "Descending", "enableLogDetails": true}
+    },
+    {
+      "id": 8, "type": "logs", "title": "Pipeline log",
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 36},
+      "datasource": {"type": "loki", "uid": "loki"},
+      "targets": [{"refId": "A", "expr": "{service=\"nyc-taxi-pipeline\"} | json | line_format \"{{.level}} {{.logger}} | {{.msg}}\""}],
+      "options": {"showTime": true, "wrapLogMessage": true, "sortOrder": "Descending", "enableLogDetails": true}
+    }
+  ]
+}

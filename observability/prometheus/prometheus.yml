@@ -1,0 +1,40 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Every target is listed under the address you open in the browser (localhost:<published port>) and
+# scraped through its service name inside the compose network (proxy_url). So the endpoint links on
+# Status > Target health open the real /metrics page, and Prometheus still reaches each container:
+# a target such as pushgateway:9091 only resolves inside Docker, and a container id (the hostname
+# Prometheus used for itself before --web.external-url) resolves nowhere.
+scrape_configs:
+  # Pipeline metrics: each batch step pushes to the Pushgateway. honor_labels keeps job/step/mes
+  # from the push.
+  - job_name: pushgateway
+    honor_labels: true
+    proxy_url: http://pushgateway:9091
+    static_configs:
+      - targets: ["localhost:9091"]
+
+  # The stack itself (memory, ingestion rate, errors of each service).
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: loki
+    scrape_interval: 30s
+    proxy_url: http://loki:3100
+    static_configs:
+      - targets: ["localhost:3100"]
+
+  - job_name: alloy
+    scrape_interval: 30s
+    proxy_url: http://alloy:12345
+    static_configs:
+      - targets: ["localhost:12345"]
+
+  - job_name: grafana
+    scrape_interval: 30s
+    proxy_url: http://grafana:3000
+    static_configs:
+      - targets: ["localhost:3002"]
