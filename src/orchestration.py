@@ -4,11 +4,15 @@ Asset graph (monthly partitions, key = YYYY-MM):
 
     taxi_zone_lookup ─┐
     raw_yellow_trips ─┴─> yellow_schema_report ─> curated_yellow_trips ─> raw/yellow_trips ─┐
-                                                   (asset check: reconciliation)            ├─> dbt models ─┬─> resultados_md
-    taxi_zone_lookup ──────────────────────────────────────────────────> raw/taxi_zones ───┘   (staging ->  │   (results/YYYY/RESULTS_MM.md)
-                                                                                                marts)      └─> superset_dashboards
+                                                   (asset check: reconciliation)            ├─> dbt models ─┬─> resultados_md ─────┐
+    taxi_zone_lookup ──────────────────────────────────────────────────> raw/taxi_zones ───┘   (staging ->  │                      ├─> superset_respaldo
+                                                                                                marts ->     └─> superset_dashboards ┘
+                                                                                                evidence)
 
-raw/yellow_trips and raw/taxi_zones are the warehouse tables loaded by src/load_snowflake.py.
+resultados_md writes results/YYYY/RESULTS_MM.md, and superset_respaldo the Superset dashboards that back it (one per month
+of the year of MES, plus the 12 months of the year), compares both and writes the result in the report.
+
+raw/yellow_trips, raw/taxi_zones, raw/quality_* and raw/schema_findings are the warehouse tables loaded by src/load_snowflake.py.
 They share their asset keys with the dbt sources, so the lineage continues into the dbt models.
 Each step keeps its own module (src/*.py). Dagster adds partitions, run history, lineage and
 asset checks, and the steps still run one by one from the Makefile.
@@ -18,9 +22,11 @@ goes to the Postgres of docker compose (src/dagster_instance.py), which the Dags
 reads, so http://localhost:3003 shows each run as soon as it finishes.
 
     python -m src.orchestration --mes 2025-01      # the month and the same month of the previous year
+    python -m src.orchestration --anio 2025        # the 12 months of 2025, one run each (a month that cannot run is skipped)
 
 MES can be any month from 2010-01 (compared with 2009-01, the first TLC Parquet file) to the last month
-the TLC has published. Both are checked before anything runs.
+the TLC has published. Both are checked before anything runs. A month without data to compare gets a report
+that says so (src/resultados.py), and never replaces a report that has figures.
     python -m src.run_tool dagster-ui 3003         # local UI, only when docker compose is not running
 
 No `from __future__ import annotations` here: Dagster inspects the real type of `context`.
@@ -29,9 +35,10 @@ import argparse
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
-from src.config import ROOT, YELLOW_URL_TEMPLATE, Month, Settings, dbt_target, months_for, track_step
+from src.config import FIRST_TLC_MONTH, ROOT, YELLOW_URL_TEMPLATE, Month, Settings, dbt_target, months_for, track_step
 
 os.environ.setdefault("DAGSTER_HOME", str(Settings.from_env().data_dir / "dagster_home"))
 os.environ.setdefault("DUCKDB_WAREHOUSE_PATH", str(Settings.from_env().warehouse_db))  # dbt duckdb target
@@ -40,10 +47,12 @@ Path(os.environ["DAGSTER_HOME"]).mkdir(parents=True, exist_ok=True)
 
 from dagster import (  # noqa: E402
     AssetCheckResult,
+    AssetCheckSeverity,
     AssetCheckSpec,
     AssetExecutionContext,
     AssetKey,
     AssetSelection,
+    AssetSpec,
     Config,
     DagsterInstance,
     Definitions,
@@ -53,6 +62,7 @@ from dagster import (  # noqa: E402
     asset,
     define_asset_job,
     materialize,
+    multi_asset,
 )
 from dagster_dbt import (  # noqa: E402
     DagsterDbtTranslator,
@@ -63,7 +73,17 @@ from dagster_dbt import (  # noqa: E402
     get_asset_key_for_model,
 )
 
-from src import calidad, dagster_instance, dashboards, esquema, load_snowflake, observability, resultados  # noqa: E402
+from src import (  # noqa: E402
+    calidad,
+    dagster_instance,
+    dashboards,
+    esquema,
+    evidencia,
+    load_snowflake,
+    observability,
+    respaldo,
+    resultados,
+)
 from src.ingesta_airbyte import Ingestor, IngestionLog, month_published  # noqa: E402
 
 DBT_DIR = ROOT / "dbt_taxi"
@@ -188,7 +208,8 @@ def curated_yellow_trips(context: AssetExecutionContext) -> MaterializeResult:
 def warehouse_raw_yellow_trips(context: AssetExecutionContext) -> MaterializeResult:
     settings, month = _settings(), Month.parse(context.partition_key)
     with track_step(settings, f"load-{settings.warehouse}", month.label):
-        result = load_snowflake.load_months(settings, [month], include_zones=False, include_quarantine=False)[0]
+        result = load_snowflake.load_months(settings, [month], include_zones=False, include_quarantine=False,
+                                            include_quality=False)[0]
     return MaterializeResult(metadata={"rows_loaded": result.rows_loaded, "rows_replaced": result.rows_deleted,
                                        "warehouse": settings.warehouse})
 
@@ -202,7 +223,8 @@ def warehouse_raw_yellow_quarantine(context: AssetExecutionContext) -> Materiali
     settings, month = _settings(), Month.parse(context.partition_key)
     with track_step(settings, f"quarantine-{settings.warehouse}", month.label):
         s3_uri = calidad.publish_quarantine(settings, month)
-        result = load_snowflake.load_months(settings, [month], include_zones=False, include_trips=False)[0]
+        result = load_snowflake.load_months(settings, [month], include_zones=False, include_trips=False,
+                                            include_quality=False)[0]
         by_rule = calidad.quarantine_by_rule(settings, month)
     return MaterializeResult(metadata={
         "rows_loaded": result.rows_loaded,
@@ -212,6 +234,29 @@ def warehouse_raw_yellow_quarantine(context: AssetExecutionContext) -> Materiali
         "local_file": MetadataValue.path(str(calidad.quarantine_file(settings, month))),
         "s3": s3_uri or "offline mode: local file only",
     })
+
+
+QUALITY_KEYS = [AssetKey(["raw", table]) for table in load_snowflake.QUALITY_TABLES]
+QUALITY_DESCRIPTIONS = {
+    "quality_summary": "Quality gate of the month, as reported by the run that loaded it: rows read, accepted, quarantined, with warnings.",
+    "quality_rules": "Rows violating each quality rule in the month, rejects and warnings.",
+    "schema_findings": "What the month's file brought compared with contracts/yellow_schema.yaml (one row per finding).",
+}
+
+
+@multi_asset(
+    name="warehouse_raw_quality", partitions_def=MONTHLY,
+    specs=[AssetSpec(key, deps=[curated_yellow_trips, AssetKey(["raw", "yellow_trips"])], group_name="warehouse", kinds={"snowflake"},
+                     description=QUALITY_DESCRIPTIONS[key.path[-1]]) for key in QUALITY_KEYS])
+def warehouse_raw_quality(context: AssetExecutionContext):
+    """The quality and schema reports of the month, from the local control database to the warehouse (replaced as a whole)."""
+    settings, month = _settings(), Month.parse(context.partition_key)
+    with track_step(settings, f"quality-report-{settings.warehouse}", month.label):
+        results = load_snowflake.load_months(settings, [month], include_zones=False, include_trips=False, include_quarantine=False)
+    published = [r.mes for r in results]
+    for key in QUALITY_KEYS:
+        yield MaterializeResult(asset_key=key, metadata={"months_published": MetadataValue.json(published),
+                                                         "warehouse": settings.warehouse})
 
 
 @asset(key=AssetKey(["raw", "taxi_zones"]), group_name="warehouse", kinds={"snowflake"}, deps=[taxi_zone_lookup],
@@ -243,22 +288,39 @@ class QuestionsConfig(Config):
     mes: str = os.environ.get("MES", "2025-01")
 
 
+EVIDENCE_MODELS = [get_asset_key_for_model([dbt_models], name) for name in ("ev_comparaciones", *evidencia.TABLAS)]
+MART_MODELS = [get_asset_key_for_model([dbt_models], name)
+               for name in ("fact_trips", "agg_zone_hour", "dim_zone", "dim_date", "agg_quarantine_rule")]
+
+
 @asset(group_name="analytics", kinds={"sql"},
-       deps=[get_asset_key_for_model([dbt_models], name)
-             for name in ("fact_trips", "agg_zone_hour", "dim_zone", "dim_date", "agg_quarantine_rule")],
+       deps=[*MART_MODELS, *EVIDENCE_MODELS,
+             *(get_asset_key_for_model([dbt_models], name) for name in (
+                 "agg_month_profile", "agg_zone_month", "agg_hour_month", "agg_day", "agg_payment_month", "agg_airport_month",
+                 "top_fare_trips"))],
+       check_specs=[AssetCheckSpec("cifras_respaldadas", asset="resultados_md",
+                                   description="every number of the report is shown by the Superset charts its block cites")],
        description="sql/q1..q6 and sql/contexto against the marts -> results/YYYY/RESULTS_MM.md (MES vs the same month of "
-                   "the previous year, interpreted in Spanish from the numbers of the run) and the README")
+                   "the previous year, interpreted in Spanish from the numbers of the run, with the Superset chart behind "
+                   "every figure) and the README")
 def resultados_md(context: AssetExecutionContext, config: QuestionsConfig) -> MaterializeResult:
     settings = _settings()
     with track_step(settings, "questions", config.mes):
-        path = resultados.write_results(settings, Month.parse(config.mes))
-    return MaterializeResult(metadata={"results": MetadataValue.path(str(path))})
+        report = resultados.write_report(settings, Month.parse(config.mes))
+    unbacked = [f"{c.texto} ({evidencia.seccion_corta(c.seccion)})" for c in report.sin_respaldo]
+    return MaterializeResult(
+        metadata={"results": MetadataValue.path(str(report.path)), "figures": len(report.cifras),
+                  "figures_without_chart": len(unbacked)},
+        check_results=[AssetCheckResult(
+            check_name="cifras_respaldadas", passed=not unbacked and not report.avisos, severity=AssetCheckSeverity.WARN,
+            metadata={"figures": len(report.cifras), "without_chart": MetadataValue.json(unbacked),
+                      "differences": MetadataValue.json(report.avisos)})],
+    )
 
 
 @asset(group_name="analytics", kinds={"superset"},
-       deps=[get_asset_key_for_model([dbt_models], name)
-             for name in ("fact_trips", "agg_zone_hour", "dim_zone", "dim_date", "agg_quarantine_rule")],
-       description="The 6 Superset dashboards (English) on the marts, created or updated through the Superset API "
+       deps=MART_MODELS,
+       description="The 7 Superset dashboards (English) on the marts, created or updated through the Superset API "
                    "(Snowflake, or the offline DuckDB copy when WAREHOUSE=duckdb).")
 def superset_dashboards(context: AssetExecutionContext, config: QuestionsConfig) -> MaterializeResult:
     settings = _settings()
@@ -272,10 +334,37 @@ def superset_dashboards(context: AssetExecutionContext, config: QuestionsConfig)
     })
 
 
+@asset(group_name="analytics", kinds={"superset"},
+       deps=[resultados_md, superset_dashboards, *EVIDENCE_MODELS],
+       # Blocking: a report that does not match what Superset shows makes the run fail.
+       check_specs=[AssetCheckSpec("superset_coincide", asset="superset_respaldo", blocking=True,
+                                   description="the data Superset returns for every evidence chart is the data of the report")],
+       description="Evidence dashboards (Spanish) of the reports in results/: one per month of the year of MES, with the chart "
+                   "behind every figure and conclusion, and the 12 months of the year against the previous year. They are "
+                   "compared with the evidence through the Superset API and the result is written in the report.")
+def superset_respaldo(context: AssetExecutionContext, config: QuestionsConfig) -> MaterializeResult:
+    settings = _settings()
+    with track_step(settings, "evidence-dashboards", config.mes):
+        # superset_dashboards has just refreshed the offline BI copy of this run.
+        summary = respaldo.build(settings, Month.parse(config.mes), exportar=False)
+    return MaterializeResult(
+        metadata={
+            "dashboards": MetadataValue.json(summary["tableros"]),
+            "charts": summary["charts"],
+            "written": MetadataValue.json(summary["escritos"]),
+            "verification": summary["verificacion"],
+        },
+        check_results=[AssetCheckResult(check_name="superset_coincide", passed=summary["ok"], severity=AssetCheckSeverity.ERROR,
+                                        metadata={"verification": summary["verificacion"],
+                                                  "differences": MetadataValue.json(summary["diferencias"])})],
+    )
+
+
 MONTHLY_ASSETS = [raw_yellow_trips, yellow_schema_report, curated_yellow_trips, warehouse_raw_yellow_trips,
-                  warehouse_raw_yellow_quarantine]
+                  warehouse_raw_yellow_quarantine, warehouse_raw_quality]
 RAW_SOURCE_KEYS = [AssetKey(["raw", "yellow_trips"]), AssetKey(["raw", "yellow_quarantine"]), AssetKey(["raw", "taxi_zones"])]
-ALL_ASSETS = [taxi_zone_lookup, *MONTHLY_ASSETS, warehouse_raw_taxi_zones, dbt_models, resultados_md, superset_dashboards]
+ALL_ASSETS = [taxi_zone_lookup, *MONTHLY_ASSETS, warehouse_raw_taxi_zones, dbt_models, resultados_md, superset_dashboards,
+              superset_respaldo]
 RESOURCES = {"dbt": DbtCliResource(project_dir=DBT_PROJECT, profiles_dir=str(DBT_DIR), target=_target(),
                                    dbt_executable=DBT_EXE)}
 
@@ -286,7 +375,7 @@ defs = Definitions(
         define_asset_job("monthly_pipeline", AssetSelection.assets(*MONTHLY_ASSETS),
                          description="ingest -> schema -> quality -> load for one month"),
         define_asset_job("reference_data", AssetSelection.assets(taxi_zone_lookup, warehouse_raw_taxi_zones)),
-        define_asset_job("warehouse_models", AssetSelection.assets(dbt_models, resultados_md, superset_dashboards),
+        define_asset_job("warehouse_models", AssetSelection.assets(dbt_models, resultados_md, superset_dashboards, superset_respaldo),
                          description="dbt build + results/YYYY/RESULTS_MM.md + Superset dashboards"),
     ],
 )
@@ -303,12 +392,13 @@ def check_months(mes: str) -> list[Month] | None:
     """The two months of MES, or None (after saying why) when they cannot be compared: MES older than
     2010-01, in the future, or not published by the TLC yet (asked to the TLC CDN, unless the month was
     already ingested in this DATA_DIR)."""
+    settings = _settings()
     try:
         months = months_for(mes)
     except ValueError as exc:
         print(f"Cannot run MES={mes}: {exc}", file=sys.stderr)
+        _say_why_in_the_report(settings, mes)
         return None
-    settings = _settings()
     log = IngestionLog(settings)
     for month in months:
         if log.last_ok("yellow", month.label):
@@ -317,8 +407,28 @@ def check_months(mes: str) -> list[Month] | None:
             print(f"Cannot run MES={mes}: the TLC has not published {month} yet "
                   f"({YELLOW_URL_TEMPLATE.format(mes=month.label)} does not exist). It publishes each month about two "
                   "months after it ends.", file=sys.stderr)
+            resultados.write_unavailable(settings, months[0], f"la TLC todavía no publicó {resultados.interp.mes_es(month)} (publica cada "
+                                         "mes unos dos meses después de que termina)")
             return None
     return months
+
+
+def _say_why_in_the_report(settings: Settings, mes: str) -> None:
+    """A real month that cannot be compared gets a report without figures that says why. A typo (2025-13), a year the TLC
+    never published or one that has not started gets only the message."""
+    try:
+        month = Month.parse(mes)
+    except ValueError:
+        return
+    today = datetime.now(timezone.utc)
+    if FIRST_TLC_MONTH <= month and month.comparison < FIRST_TLC_MONTH:
+        reason = (f"los archivos de la TLC empiezan en {resultados.interp.mes_es(FIRST_TLC_MONTH)}, así que no existe "
+                  f"{resultados.interp.mes_es(month.comparison)} para comparar")
+    elif month.year == today.year and month.month > today.month:
+        reason = f"{resultados.interp.mes_es(month)} todavía no empezó"
+    else:
+        return
+    resultados.write_unavailable(settings, month, reason)
 
 
 def run(mes: str) -> int:
@@ -354,10 +464,12 @@ def run(mes: str) -> int:
 
     def dashboards_step() -> bool:
         if not dashboards.superset_expected():
-            print(f"Superset is not running ({dashboards.superset_url()}): dashboards skipped. Start the stack with "
-                  "`docker compose up -d` and run `make all` again (or `make superset-dashboards`).", file=sys.stderr)
+            print(f"Superset is not running ({dashboards.superset_url()}): dashboards skipped, and the report says its figures were "
+                  "not compared with Superset yet. Start the stack with `docker compose up -d` and run "
+                  f"`make superset-dashboards {evidencia.argumentos_make(_settings(), months[0])}`.", file=sys.stderr)
             return True
-        return step([superset_dashboards], run_config={"ops": {"superset_dashboards": mes_config}})
+        return step([superset_dashboards, superset_respaldo],
+                    run_config={"ops": {"superset_dashboards": mes_config, "superset_respaldo": mes_config}})
 
     plan = [(lambda: step([taxi_zone_lookup]))]
     plan += [(lambda m=m: step(monthly, partition_key=m.label)) for m in months]
@@ -370,10 +482,29 @@ def run(mes: str) -> int:
         if not action():
             print(f"Dagster run failed: open {ui} (Runs) for the step logs.", file=sys.stderr)
             return 1
-    print(f"Pipeline finished for {', '.join(m.label for m in months)}. Results (Spanish): "
-          f"{resultados.results_file(months[0]).relative_to(ROOT).as_posix()}")
+    report = resultados.results_file(months[0])
+    print(f"Pipeline finished for {', '.join(m.label for m in months)}. Results (Spanish): {report.relative_to(ROOT).as_posix()}")
+    print(f"Evidence dashboards: {evidencia.url_tablero(dashboards.superset_public_url(), evidencia.slug_mes(_settings(), months[0]))} "
+          f"and {evidencia.slug_anio(_settings(), months[0].year)} (12 months). {evidencia.estado_verificacion(report)}")
     _print_stack_status()
     return 0
+
+
+def run_year(year: int) -> int:
+    """make all-year: the 12 months of the year, each one a complete `make all` in its own process (its own RUN_ID). A month
+    that cannot run yet (future, not published) is reported and skipped; a failed month does not stop the others."""
+    codes: dict[str, int] = {}
+    env = {k: v for k, v in os.environ.items() if k not in {"RUN_ID", "MES", "DBT_MONTHS"}}
+    for number in range(1, 13):
+        label = Month(year, number).label
+        print(f"=== {label} ({number}/12)", flush=True)
+        codes[label] = subprocess.call([sys.executable, "-m", "src.orchestration", "--mes", label], cwd=ROOT, env=env)
+    done = [m for m, code in codes.items() if code == 0]
+    skipped = [m for m, code in codes.items() if code == 2]
+    failed = [m for m, code in codes.items() if code not in (0, 2)]
+    print(f"Year {year}: {len(done)} months compared ({', '.join(done) or '-'}); without data yet: {', '.join(skipped) or '-'}; "
+          f"failed: {', '.join(failed) or '-'}")
+    return 1 if failed or not done else 0
 
 
 def _print_stack_status() -> None:
@@ -402,8 +533,11 @@ def _print_stack_status() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--mes", required=True, help="assigned month YYYY-MM")
-    return run(parser.parse_args(argv).mes)
+    scope = parser.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--mes", help="assigned month YYYY-MM")
+    scope.add_argument("--anio", type=int, help="the 12 months of this year, one run each")
+    args = parser.parse_args(argv)
+    return run_year(args.anio) if args.anio is not None else run(args.mes)
 
 
 if __name__ == "__main__":

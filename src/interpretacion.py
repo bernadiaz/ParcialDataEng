@@ -3,9 +3,9 @@
 Nada de lo que se escribe acá es texto fijo: cada frase se arma con los números de la corrida.
 src/resultados.py ejecuta las 6 preguntas (sql/q*.sql) y, además, las consultas de contexto de
 sql/contexto/ (perfil del mes, zonas, horas, calendario, peaje CBD, pagos, aeropuertos, tarifas
-atípicas). Con esos datos, más los reportes de esquema y de calidad de la base de control local
-(qué traía cada parquet, qué se convirtió, qué se fue a cuarentena y por qué regla), este módulo
-redacta:
+atípicas, y los reportes de esquema y de calidad: qué traía cada parquet, qué se convirtió, qué se fue a
+cuarentena y por qué regla). Las consultas de contexto leen los agregados mensuales y las tablas de evidencia
+de dbt, las mismas que leen los tableros de respaldo de Superset. Con esos datos este módulo redacta:
 
   - un resumen de una frase,
   - la sección de calidad de datos y cuarentena,
@@ -13,7 +13,8 @@ redacta:
   - las conclusiones.
 
 Las reglas de redacción (umbrales para decir "se mantiene", "crece con fuerza", cuándo un atípico
-merece una advertencia, etc.) están en este archivo y se prueban en tests/test_interpretacion.py.
+merece una advertencia, etc.) están en este archivo. src/evidencia.py audita después cada número del texto contra
+los charts de Superset que lo respaldan (tests/test_evidencia.py).
 """
 from __future__ import annotations
 
@@ -143,7 +144,8 @@ def context_files() -> list[Path]:
 
 
 def render_context(path: Path, month: Month) -> str:
-    params = {"YEAR": month.year, "MONTH": month.month, "CMP_YEAR": month.comparison.year, "FARE_CAP": FARE_CAP}
+    params = {"YEAR": month.year, "MONTH": month.month, "CMP_YEAR": month.comparison.year, "FARE_CAP": FARE_CAP,
+              "MES": month.label}
     return Template(path.read_text(encoding="utf-8")).substitute(params).strip().rstrip(";")
 
 
@@ -170,9 +172,10 @@ class CalidadMes:
     rows_with_warnings: int | None  # None: only the warehouse was available (no warnings there)
     reconciled: bool
     rules: dict[str, int] = field(default_factory=dict)  # rule id -> rows violating it
-    source: str = "control"  # control = local control database; warehouse = fallback
+    source: str = "control"  # control = quality report of the run; warehouse = fallback
     schema: dict[str, Any] = field(default_factory=dict)
     ingestion: dict[str, Any] = field(default_factory=dict)
+    run_id: str = ""
 
     def pct(self, rows: int | None) -> float:
         return share(rows, self.rows_read)
@@ -234,19 +237,49 @@ def quality_from_control(settings: Settings, mes: str) -> CalidadMes | None:
             "value_mapped": _json(schema.get("value_mapped"), []),
             "derived": _json(schema.get("derived_columns"), {}),
         } if schema else {},
-        ingestion=ingestion,
+        ingestion=ingestion, run_id=str(run_id),
     )
 
 
-def quality_from_warehouse(month: Month, year: int, data: dict[str, list[dict[str, Any]]]) -> CalidadMes | None:
-    counts = next((r for r in data.get("cuarentena", []) if int(r["year"]) == year), None)
-    if counts is None:
+def quality_from_evidence(data: dict[str, list[dict[str, Any]]], year: int) -> CalidadMes | None:
+    """Quality gate of one month from the evidence tables (marts.ev_calidad, ev_reglas and ev_esquema): the same rows
+    that the Superset dashboards show. None = the month is not part of a comparison."""
+    row = next((r for r in data.get("cuarentena", []) if int(r["anio_periodo"]) == year), None)
+    if row is None:
         return None
-    accepted, quarantined = int(counts["accepted"]), int(counts["quarantined"])
-    rules = {r["rule_id"]: int(r["quarantined_rows"]) for r in data.get("reglas", []) if int(r["year"]) == year}
-    return CalidadMes(mes=Month(year, month.month).label, rows_read=accepted + quarantined, rows_accepted=accepted,
-                      rows_quarantined=quarantined, rows_with_warnings=None, reconciled=True, rules=rules,
-                      source="warehouse")
+    column = f"filas_{row['rol']}"
+    rules = {r["regla"]: int(r[column]) for r in data.get("reglas", []) if r.get(column) is not None}
+    findings = [r for r in data.get("esquema", []) if int(r["anio_periodo"]) == year and not str(r["tipo"]).startswith("total_")]
+
+    def columns_of(kind: str) -> list[str]:
+        return [r["columna"] for r in findings if r["tipo"] == kind]
+
+    def values_of(kind: str, field_name: str = "valores") -> dict[str, Any]:
+        return {r["columna"]: r[field_name] for r in findings if r["tipo"] == kind}
+
+    schema: dict[str, Any] = {}
+    if findings:
+        unknown, outside = values_of("unresolved_264"), values_of("unresolved_265")
+        schema = {
+            "status": "ok" if columns_of("none") else "findings",
+            "missing_optional": columns_of("missing_optional"),
+            "new_columns": columns_of("new_column"),
+            "type_mismatches": values_of("type_mismatch", "detalle"),
+            "cast_failures": {c: int(n) for c, n in values_of("cast_failure").items()},
+            "null_violations": {c: int(n) for c, n in values_of("null_violation").items()},
+            "value_mapped": columns_of("value_mapped"),
+            "derived": {
+                "inputs": {target: str(inputs).split(", ") for target, inputs in values_of("derived_zone", "detalle").items()},
+                "unresolved": {target: {"unknown_264": int(unknown.get(target) or 0), "outside_nyc_265": int(outside.get(target) or 0)}
+                               for target in unknown | outside},
+            },
+        }
+    warnings = row.get("con_advertencias")
+    return CalidadMes(
+        mes=str(row["periodo"]), rows_read=int(row["leidas"]), rows_accepted=int(row["aceptadas"]),
+        rows_quarantined=int(row["cuarentena"]), rows_with_warnings=None if warnings is None else int(warnings),
+        reconciled=row["reconcilia"] == "sí", rules=rules, source="control" if row["fuente"] == "reporte" else "warehouse",
+        schema=schema, ingestion={"file": row.get("archivo"), "row_count": row.get("filas_archivo")})
 
 
 def rule_descriptions() -> dict[str, str]:
@@ -277,7 +310,7 @@ class Analisis:
     """Every fact the texts use, computed once from the query results."""
 
     def __init__(self, settings: Settings, month: Month, data: dict[str, list[dict[str, Any]]],
-                 questions: list[dict[str, Any]], quality: dict[int, CalidadMes | None] | None = None):
+                 questions: list[dict[str, Any]]):
         from src.calidad import load_rules
 
         self.settings, self.month = settings, month
@@ -290,15 +323,7 @@ class Analisis:
         self.descripcion = rule_descriptions()
         self.perfil = {int(r["year"]): r for r in data.get("perfil_mes", [])}
         self.ok = self.A in self.perfil and self.B in self.perfil
-        self.quality: dict[int, CalidadMes | None] = dict(quality or {})
-        for year in (self.A, self.B):
-            stored = self.quality.get(year)
-            warehouse = quality_from_warehouse(month, year, data)
-            if stored is None or (warehouse is not None and stored.rows_accepted != warehouse.rows_accepted):
-                # No local report, or one from another run than the rows in the warehouse: the warehouse wins.
-                if stored is not None and warehouse is not None:
-                    warehouse.schema, warehouse.ingestion = stored.schema, stored.ingestion
-                self.quality[year] = warehouse
+        self.quality: dict[int, CalidadMes | None] = {y: quality_from_evidence(data, y) for y in (self.A, self.B)}
         self._zones()
         self._hours()
         self.dias = {y: {int(r["day_of_week_iso"]): r for r in data.get("dias_semana", []) if int(r["year"]) == y}
@@ -325,7 +350,8 @@ class Analisis:
             entry[int(r["year"])] += int(r["trips"])
         self.zones = zones
         self.zone_total = {y: sum(z[y] for z in zones.values()) for y in (self.A, self.B)}
-        self.top = {y: sorted((z for z in zones.values() if z[y] > 0), key=lambda z: -z[y])[:10] for y in (self.A, self.B)}
+        # Same tie-break as marts.ev_zonas (puesto_mes, puesto_anterior): trips, then location id.
+        self.top = {y: sorted((z for z in zones.values() if z[y] > 0), key=lambda z: (-z[y], z["id"]))[:10] for y in (self.A, self.B)}
         boroughs: dict[str, dict[int, int]] = {}
         for z in zones.values():
             name = z["borough"] or "Unknown"
@@ -355,6 +381,16 @@ class Analisis:
 
     def trips(self, year: int) -> int:
         return int(self.p(year, "trips"))
+
+    def conteos(self) -> dict[str, int]:
+        """Counts that q1 writes with words ("nueve de las diez..."), by the id of their indicator in ev_indicadores."""
+        top, previous = self.top[self.A], self.top[self.B]
+        changes = [c for c in (variacion(z[self.A], z[self.B]) for z in top) if c is not None]
+        grow, fall = sum(c >= STABLE_PCT for c in changes), sum(c <= -STABLE_PCT for c in changes)
+        ids, previous_ids = {z["id"] for z in top}, {z["id"] for z in previous}
+        return {"top10_zonas": len(top), "top10_manhattan": sum(z["borough"] == "Manhattan" for z in top), "top10_crecen": grow,
+                "top10_caen": fall, "top10_estables": len(changes) - grow - fall, "top10_entran": len(ids - previous_ids),
+                "top10_salen": len(previous_ids - ids)}
 
     def airport_share(self, year: int) -> float:
         return share(self.aero.get(year, {}).get("airport_trips"), self.trips(year))
@@ -406,8 +442,9 @@ def resumen(a: Analisis) -> str:
     return text
 
 
-def calidad_seccion(a: Analisis) -> list[str]:
-    """Markdown lines: how the quality gate works, both months side by side, every rule, the schema."""
+def calidad_bloques(a: Analisis) -> list[tuple[str, list[str]]]:
+    """(key of its evidence in src/evidencia.py, markdown lines): how the quality gate works, both months side by side,
+    every rule, what changed and the schema. The first block has no figures, so it has no key."""
     cloud = a.settings.warehouse == "snowflake"
     lines = [
         "Antes de responder las preguntas, cada archivo parquet de la TLC pasa por el contrato de esquema "
@@ -421,11 +458,11 @@ def calidad_seccion(a: Analisis) -> list[str]:
         "(`source_file`, `source_row_number`) y las reglas de rechazo que violó (`violated_rules`). "
         "Las reglas `warning` no descartan la fila: solo la marcan en `quality_flags`. Si en algún mes "
         "`leídas = aceptadas + cuarentena` no se cumpliera, el pipeline se detiene antes de publicar ese mes.",
-        "",
     ]
+    blocks: list[tuple[str, list[str]]] = [("", lines)]
     qa, qb = a.quality.get(a.A), a.quality.get(a.B)
     months = [(a.month, qa), (a.month.comparison, qb)]
-    lines += ["| mes | archivo | filas en el parquet | leídas | aceptadas | cuarentena | % cuarentena | aceptadas con warnings | reconcilia |",
+    lines = ["| mes | archivo | filas en el parquet | leídas | aceptadas | cuarentena | % cuarentena | aceptadas con warnings | reconcilia |",
               "|---|---|---:|---:|---:|---:|---:|---:|---|"]
     for month, q in months:
         if q is None:
@@ -438,10 +475,10 @@ def calidad_seccion(a: Analisis) -> list[str]:
             f"| {month.label} | `{file_name}` | {entero(file_rows) if file_rows is not None else '-'} | {entero(q.rows_read)} | "
             f"{entero(q.rows_accepted)} | {entero(q.rows_quarantined)} | {pct(q.pct(q.rows_quarantined), 2)} | "
             f"{warnings} | {'sí' if q.reconciled and q.rows_read == q.rows_accepted + q.rows_quarantined else 'no'} |")
-    lines.append("")
+    blocks.append(("calidad_conteos", lines))
 
     # every rule, both months
-    lines += [f"| regla | severidad | qué controla | {a.month.label} | {a.month.comparison.label} | cambio |",
+    lines = [f"| regla | severidad | qué controla | {a.month.label} | {a.month.comparison.label} | cambio |",
               "|---|---|---|---:|---:|---:|"]
     for rule in a.rules.values():
         cells = []
@@ -457,11 +494,11 @@ def calidad_seccion(a: Analisis) -> list[str]:
         change = puntos(values[0] - values[1], 2) if None not in values else "-"
         lines.append(f"| {rule.id} | {rule.severity} | {a.descripcion.get(rule.id) or rule.description} | {cells[0]} | "
                      f"{cells[1]} | {change} |")
-    lines += ["", "Una fila puede violar varias reglas, por eso la suma por regla supera el total en cuarentena.", ""]
-    lines += [f"- {p}" for p in calidad_lectura(a)]
-    lines.append("")
-    lines += [f"- {p}" for p in esquema_lectura(a)]
-    return lines
+    lines += ["", "Una fila puede violar varias reglas, por eso la suma por regla supera el total en cuarentena."]
+    blocks.append(("calidad_reglas", lines))
+    blocks.append(("calidad_lectura", [f"- {p}" for p in calidad_lectura(a)]))
+    blocks.append(("esquema", [f"- {p}" for p in esquema_lectura(a)]))
+    return blocks
 
 
 def calidad_lectura(a: Analisis) -> list[str]:
@@ -470,8 +507,7 @@ def calidad_lectura(a: Analisis) -> list[str]:
     qa, qb = a.quality.get(a.A), a.quality.get(a.B)
     if qa is None or qb is None:
         missing = [m.label for m, q in ((a.month, qa), (a.month.comparison, qb)) if q is None]
-        out.append(f"No hay reporte de calidad para {lista(missing)} en la base de control ni en el warehouse: "
-                   "corré `make all` para ese mes.")
+        out.append(f"No hay reporte de calidad para {lista(missing)} en el warehouse: corré `make all` para ese mes.")
         return out
     pa, pb = qa.pct(qa.rows_quarantined), qb.pct(qb.rows_quarantined)
     trend = verbo(pa - pb, "sube", "baja", "se mantiene", stable=0.1)
@@ -506,7 +542,7 @@ def calidad_lectura(a: Analisis) -> list[str]:
     out.append("En los dos meses se cumple la reconciliación: leídas = aceptadas + cuarentena." if reconciled else
                "La reconciliación NO se cumple en algún mes: el pipeline no debería haber publicado ese mes.")
     if qa.source == "warehouse" or qb.source == "warehouse":
-        out.append("La base de control local no tenía el reporte completo de algún mes, así que los conteos salen del "
+        out.append("No hay un reporte de calidad de las filas cargadas de algún mes, así que los conteos salen del "
                    "warehouse (aceptadas en fact_trips, cuarentena en raw.yellow_quarantine) y no incluyen las advertencias.")
     return out
 
@@ -518,7 +554,7 @@ def esquema_lectura(a: Analisis) -> list[str]:
         name = mes_es(month)
         schema = (q.schema if q else {}) or {}
         if not schema:
-            out.append(f"Esquema de {name}: sin reporte en la base de control (los datos vienen del warehouse).")
+            out.append(f"Esquema de {name}: sin reporte de esquema en el warehouse.")
             continue
         notes: list[str] = []
         derived = (schema.get("derived") or {}).get("inputs") or {}
@@ -548,8 +584,9 @@ def esquema_lectura(a: Analisis) -> list[str]:
         mismatches = schema.get("type_mismatches") or {}
         if mismatches:
             shown = [f"`{c}` ({t.replace(' -> ', ' → ')})" for c, t in list(mismatches.items())[:4]]
-            more = f" y {len(mismatches) - 4} más" if len(mismatches) > 4 else ""
-            notes.append(f"guarda algunos campos con otro tipo ({', '.join(shown)}{more}): se convierten con TRY_CAST")
+            how_many = f"{len(mismatches)} campos" if len(mismatches) > 4 else "algunos campos"
+            more = ", entre otros" if len(mismatches) > 4 else ""
+            notes.append(f"guarda {how_many} con otro tipo ({', '.join(shown)}{more}): se convierten con TRY_CAST")
         failures = schema.get("cast_failures") or {}
         if failures:
             notes.append(f"{entero(sum(failures.values()))} valores no se pudieron convertir y quedaron en NULL "
@@ -736,10 +773,9 @@ def q2(a: Analisis) -> str:
         else:
             sentences.append(f"Además es una hora de mucho movimiento ({entero(row['trips'])} viajes; la hora pico es "
                              f"{hora(peak_a['pickup_hour'])} con {entero(peak_a['trips'])}).")
-        total_trips = sum(r["trips"] for r in hours_a.values())
-        airport_all = share(sum(r["airport_trips"] for r in hours_a.values()), total_trips)
+        airport_all = a.airport_share(a.A)
         airport_h = share(row["airport_trips"], row["trips"])
-        dist_all = sum(float(r["avg_distance"] or 0) * r["trips"] for r in hours_a.values()) / total_trips
+        dist_all = a.p(a.A, "avg_distance")
         dist_h = float(row["avg_distance"] or 0)
         reasons = []
         if airport_h >= 1.3 * airport_all and airport_h - airport_all >= 2:
@@ -754,7 +790,8 @@ def q2(a: Analisis) -> str:
                              "día: pesan los recargos y peajes de esos viajes.")
         if hb == ha and ha in a.hours[a.B]:
             row_b = a.hours[a.B][ha]
-            change = variacion(ra, rb)
+            # Not from the 2-decimal figures of q2: rounding twice would change the first decimal of the %.
+            change = variacion(float(row["revenue_per_trip"]), float(row_b["revenue_per_trip"]))
             airport_hb = share(row_b["airport_trips"], row_b["trips"])
             dist_hb = float(row_b["avg_distance"] or 0)
             # (text, sign): a cause raises (+1) or lowers (-1) the revenue per trip
@@ -821,7 +858,7 @@ def q3(a: Analisis) -> str:
                 f"de zonas no tiene significado. El cobro por viaje empezó el {start_text}; comparar contra un mes desde "
                 "2025 muestra su efecto.")
     with_fee, trips = int(overall["trips_with_cbd_fee"]), int(overall["trips"])
-    share_a = float(overall["pct_with_cbd_fee"])
+    share_a = share(with_fee, trips)
     avg_fee, min_fee = a.p(a.A, "avg_cbd_fee"), a.p(a.A, "min_cbd_fee")
     amount = (f"siempre {usd(avg_fee)}" if abs(avg_fee - min_fee) < 0.005 else f"un cobro medio de {usd(avg_fee)}")
     sentences = [f"El {pct(share_a, 2)} de los viajes de {a.mes_a} pagó cbd_congestion_fee ({entero(with_fee)} de "
@@ -974,24 +1011,28 @@ def q5(a: Analisis) -> str:
 
 
 def q6(a: Analisis) -> str:
+    return "\n".join(text for _, text in q6_lineas(a))
+
+
+def q6_lineas(a: Analisis) -> list[tuple[str, str]]:
+    """(key of its evidence in src/evidencia.py, text) of each line of the interpretation of question 6."""
     if not a.ok:
-        return f"No hay viajes aceptados en alguno de los dos meses ({a.mes_a}, {a.mes_b})."
-    lines = []
+        return [("q6_volumen", f"No hay viajes aceptados en alguno de los dos meses ({a.mes_a}, {a.mes_b}).")]
+    lines: list[tuple[str, str]] = []
     trips_a, trips_b = a.trips(a.A), a.trips(a.B)
     change = variacion(trips_a, trips_b) or 0.0
     revenue_change = variacion(a.p(a.A, "revenue"), a.p(a.B, "revenue")) or 0.0
-    lines.append(
+    lines.append((
+        "q6_volumen",
         f"{cap(a.mes_a)} tuvo {entero(trips_a)} viajes válidos contra {entero(trips_b)} en {a.mes_b}: "
         f"{signo(trips_a - trips_b, 0, '')} viajes ({signo(change, 2)}). La recaudación total (total_amount) "
         f"{verbo(revenue_change, 'crece', 'cae', 'se mantiene')} {'un ' + pct(abs(revenue_change)) + ', ' if abs(revenue_change) >= STABLE_PCT else ''}"
-        f"de {usd_millones(a.p(a.B, 'revenue'))} a {usd_millones(a.p(a.A, 'revenue'))}.")
-    lines.append(_calendar_line(a, change))
-    lines.append(_fare_line(a))
-    mix = _mix_line(a)
-    if mix:
-        lines.append(mix)
-    lines.append(_quality_line(a))
-    return "\n".join(line for line in lines if line)
+        f"de {usd_millones(a.p(a.B, 'revenue'))} a {usd_millones(a.p(a.A, 'revenue'))}."))
+    lines.append(("q6_calendario", _calendar_line(a, change)))
+    lines.append(("q6_tarifa", _fare_line(a)))
+    lines.append(("q6_mezcla", _mix_line(a)))
+    lines.append(("q6_calidad", _quality_line(a)))
+    return [(key, text) for key, text in lines if text]
 
 
 def _calendar_line(a: Analisis, change: float) -> str:
@@ -1136,10 +1177,11 @@ def _quality_line(a: Analisis) -> str:
     return "Calidad: " + lines[0][0].lower() + lines[0][1:] + (" " + lines[-1] if len(lines) > 1 else "")
 
 
-def conclusiones(a: Analisis, command: str) -> list[str]:
+def conclusiones(a: Analisis, command: str) -> list[tuple[str, str]]:
+    """(key of its evidence in src/evidencia.py, text) of each conclusion."""
     if not a.ok:
-        return [f"No hay datos aceptados suficientes para comparar {a.mes_a} con {a.mes_b}; ver la sección de calidad."]
-    out = []
+        return [("c_calidad", f"No hay datos aceptados suficientes para comparar {a.mes_a} con {a.mes_b}; ver la sección de calidad.")]
+    out: list[tuple[str, str]] = []
     trips_change = variacion(a.trips(a.A), a.trips(a.B)) or 0.0
     revenue_change = variacion(a.p(a.A, "revenue"), a.p(a.B, "revenue")) or 0.0
     if abs(trips_change) < STABLE_PCT:
@@ -1147,7 +1189,9 @@ def conclusiones(a: Analisis, command: str) -> list[str]:
     else:
         demand = (f"La demanda de taxis amarillos {'crece' if trips_change > 0 else 'cae'} {intensidad(trips_change)} en "
                   f"{a.mes_a} ({signo(trips_change)} de viajes, {signo(revenue_change)} de recaudación).")
-    movers = sorted((z for z in a.zones.values() if z[a.B] > 0), key=lambda z: -(z[a.A] - z[a.B]) * (1 if trips_change >= 0 else -1))[:3]
+    # Same order as puesto_aporte in marts.ev_zonas: the zones that move the total the most, in its direction.
+    movers = sorted((z for z in a.zones.values() if z[a.B] > 0),
+                    key=lambda z: (-(z[a.A] - z[a.B]) * (1 if trips_change >= 0 else -1), z["id"]))[:3]
     if movers:
         demand += (f" Las zonas que más {'suman' if trips_change >= 0 else 'pierden'} viajes son "
                    f"{lista([z['zone'] + ' (' + signo(variacion(z[a.A], z[a.B]) or 0) + ')' for z in movers])}")
@@ -1160,7 +1204,7 @@ def conclusiones(a: Analisis, command: str) -> list[str]:
             else:
                 demand += ", mientras los aeropuertos se quedan atrás"
         demand += "."
-    out.append(demand)
+    out.append(("c_demanda", demand))
     if a.p(a.A, "cbd_fee_reported") > 0:
         share_a = share(a.p(a.A, "trips_with_cbd_fee"), a.trips(a.A))
         top_cbd = [r["scope"] for r in a.q[3]["records"] if r["scope"] != "ALL ZONES"]
@@ -1178,7 +1222,7 @@ def conclusiones(a: Analisis, command: str) -> list[str]:
         else:
             share_b = share(a.p(a.B, "trips_with_cbd_fee"), a.trips(a.B))
             text += f", contra {pct(share_b)} en {a.mes_b}."
-        out.append(text if text.endswith(".") else text + ".")
+        out.append(("c_peaje", text if text.endswith(".") else text + "."))
     distance = variacion(a.p(a.A, "avg_distance"), a.p(a.B, "avg_distance")) or 0.0
     fare = variacion(a.fare(a.A), a.fare(a.B)) or 0.0
     median = variacion(a.p(a.A, "median_fare"), a.p(a.B, "median_fare"))
@@ -1205,9 +1249,9 @@ def conclusiones(a: Analisis, command: str) -> list[str]:
         tip_a, tip_b = float(card_a["avg_tip_pct"] or 0), float(card_b["avg_tip_pct"] or 0)
         profile += (f". La propina con tarjeta {'no se mueve' if abs(tip_a - tip_b) < 0.3 else 'sube' if tip_a > tip_b else 'baja'} "
                     f"({pct(tip_b, 1)} → {pct(tip_a, 1)})")
-    out.append(profile + ".")
-    out.append(_outliers_conclusion(a))
-    out.append(_closing(a, command))
+    out.append(("c_perfil", profile + "."))
+    out.append(("c_atipicos", _outliers_conclusion(a)))
+    out.append(("c_calidad", _closing(a, command)))
     return out
 
 
@@ -1272,7 +1316,7 @@ def _closing(a: Analisis, command: str) -> str:
     elif reported:
         text = "Los dos archivos respetan el contrato de esquema."
     else:
-        text = "No hay reporte de esquema de algún mes en la base de control local (las cifras de calidad salen del warehouse)."
+        text = "No hay reporte de esquema de algún mes en el warehouse."
     if qa and qb:
         text += (f" La cuarentena es del {pct(qa.pct(qa.rows_quarantined), 2)} y del {pct(qb.pct(qb.rows_quarantined), 2)} "
                  "de las filas leídas y los dos meses reconcilian.")

@@ -65,3 +65,47 @@ models:
         data_tests: [not_null]
       - name: quarantined_rows
         data_tests: [not_null]
+
+  # Monthly aggregates of fact_trips (incremental by month, like agg_zone_hour). The evidence models
+  # (models/evidence) are built on them, so neither the reports nor Superset scan the trips again.
+  - name: agg_month_profile
+    description: "Grain: one row per (year, month). Volume, revenue, fares (mean, median, capped), distance, payment mix, CBD toll."
+    columns:
+      - name: trips
+        data_tests: [not_null]
+
+  - name: agg_zone_month
+    description: "Grain: one row per (year, month, pickup zone) with trips. Trips, revenue and trips with the CBD fee."
+    columns:
+      - name: trips
+        data_tests: [not_null]
+
+  - name: agg_hour_month
+    description: "Grain: one row per (year, month, pickup hour). Trips, revenue per trip, airport trips, distance, highest fare."
+    columns:
+      - name: trips
+        data_tests: [not_null]
+
+  - name: agg_day
+    description: "Grain: one row per pickup date. Trips, revenue and trips with the CBD fee."
+    columns:
+      - name: pickup_date
+        data_tests: [unique, not_null]
+
+  - name: agg_payment_month
+    description: "Grain: one row per (year, month, payment type). Trips and tip as % of the fare."
+    columns:
+      - name: trips
+        data_tests: [not_null]
+
+  - name: agg_airport_month
+    description: "Grain: one row per (year, month). Trips that start or end at JFK or LaGuardia, and their fares."
+    columns:
+      - name: airport_trips
+        data_tests: [not_null]
+
+  - name: top_fare_trips
+    description: "Grain: one row per (year, month, rank 1..3). The highest fares above var('fare_cap')."
+    columns:
+      - name: fare_amount
+        data_tests: [not_null]

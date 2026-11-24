@@ -8,6 +8,10 @@ fails the transaction rolls back, so reprocessing a month replaces only that mon
 lookup is reloaded the same way into RAW.TAXI_ZONES. Every load writes a row to RAW.LOAD_LOG
 (rows deleted, rows loaded, file SHA-256, run id), which the oral defense uses.
 
+The quality and schema reports of each month (local control database) are published too, in
+RAW.QUALITY_SUMMARY, RAW.QUALITY_RULES and RAW.SCHEMA_FINDINGS, so the Spanish reports and Superset read
+them from the same place as everything else.
+
 WAREHOUSE=duckdb runs the same logic against data/warehouse/nyc_taxi.duckdb (offline validation).
 
     python -m src.load_snowflake --mes 2025-01 --mes 2024-01
@@ -47,6 +51,25 @@ QUARANTINE_COLUMNS = (
     ("warning_flags", "VARCHAR"), ("year", "SMALLINT"), ("month", "SMALLINT"), ("run_id", "VARCHAR"),
     ("quarantined_at", "TIMESTAMPTZ"),
 )
+
+
+# Quality gate and schema contract of each month, as reported by the run that loaded it (one set per month).
+QUALITY_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
+    "quality_summary": (
+        ("year", "SMALLINT"), ("month", "SMALLINT"), ("mes", "VARCHAR"), ("source_file", "VARCHAR"), ("file_rows", "BIGINT"),
+        ("rows_read", "BIGINT"), ("rows_accepted", "BIGINT"), ("rows_quarantined", "BIGINT"),
+        ("rows_with_warnings", "BIGINT"), ("reconciled", "BOOLEAN"), ("schema_status", "VARCHAR"),
+        ("quality_run_id", "VARCHAR"),
+    ),
+    "quality_rules": (
+        ("year", "SMALLINT"), ("month", "SMALLINT"), ("rule_id", "VARCHAR"), ("severity", "VARCHAR"),
+        ("description", "VARCHAR"), ("threshold", "VARCHAR"), ("violations", "BIGINT"), ("quality_run_id", "VARCHAR"),
+    ),
+    "schema_findings": (
+        ("year", "SMALLINT"), ("month", "SMALLINT"), ("item_order", "INTEGER"), ("finding", "VARCHAR"),
+        ("column_name", "VARCHAR"), ("detail", "VARCHAR"), ("affected_values", "BIGINT"), ("quality_run_id", "VARCHAR"),
+    ),
+}
 
 
 class LoadError(RuntimeError):
@@ -165,6 +188,9 @@ class SnowflakeWarehouse:
                  RUN_ID VARCHAR, MES VARCHAR, TARGET_TABLE VARCHAR, SOURCE_FILE VARCHAR, SOURCE_SHA256 VARCHAR,
                  ROWS_DELETED INTEGER, ROWS_LOADED INTEGER, LOADED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP())"""
         )
+        for table, table_columns in QUALITY_TABLES.items():
+            columns = ",\n  ".join(f"{name.upper()} {SNOWFLAKE_TYPES[kind]}" for name, kind in table_columns)
+            self.execute(f"CREATE TABLE IF NOT EXISTS RAW.{table.upper()} (\n  {columns}\n)")
         self.execute(f"CREATE STAGE IF NOT EXISTS {self.STAGE} FILE_FORMAT = (TYPE = PARQUET)")
 
     def replace(self, table: str, mes: str, parquet: Path, where: str, params: dict[str, Any], expected: int) -> LoadResult:
@@ -211,6 +237,30 @@ class SnowflakeWarehouse:
         return self.replace("RAW.YELLOW_QUARANTINE", month.label, parquet, "YEAR = %(year)s AND MONTH = %(month)s",
                             {"year": month.year, "month": month.month}, expected)
 
+    def query(self, sql: str) -> list[tuple]:
+        return self.execute(sql)
+
+    def replace_quality(self, month: Month, tables: dict[str, list[tuple]]) -> LoadResult:
+        """The three quality tables of one month, replaced in one transaction."""
+        deleted = loaded = 0
+        self.execute("BEGIN")
+        try:
+            for table, rows in tables.items():
+                names = [name.upper() for name, _ in QUALITY_TABLES[table]]
+                with self.conn.cursor() as cur:
+                    cur.execute(f"DELETE FROM RAW.{table.upper()} WHERE YEAR = %(year)s AND MONTH = %(month)s",
+                                {"year": month.year, "month": month.month})
+                    deleted += cur.rowcount or 0
+                    if rows:
+                        cur.executemany(f"INSERT INTO RAW.{table.upper()} ({', '.join(names)}) "
+                                        f"VALUES ({', '.join(['%s'] * len(names))})", rows)
+                loaded += len(rows)
+            self.execute("COMMIT")
+        except Exception:
+            self.execute("ROLLBACK")
+            raise
+        return LoadResult("RAW.QUALITY_SUMMARY", month.label, deleted, loaded)
+
 
 # --- DuckDB (offline validation target) ---------------------------------------------------------------
 class DuckDBWarehouse:
@@ -236,6 +286,9 @@ class DuckDBWarehouse:
                source_file VARCHAR, source_sha256 VARCHAR, rows_deleted BIGINT, rows_loaded BIGINT,
                loaded_at TIMESTAMP DEFAULT current_timestamp)"""
         )
+        for table, table_columns in QUALITY_TABLES.items():
+            columns = ", ".join(f"{name} {kind}" for name, kind in table_columns)
+            self.conn.execute(f"CREATE TABLE IF NOT EXISTS raw.{table} ({columns})")
 
     def replace(self, table: str, mes: str, parquet: Path, where: str, params: list[Any], expected: int) -> LoadResult:
         self.conn.execute("BEGIN TRANSACTION")
@@ -268,6 +321,28 @@ class DuckDBWarehouse:
         return self.replace("raw.yellow_quarantine", month.label, parquet, "year = ? AND month = ?",
                             [month.year, month.month], expected)
 
+    def query(self, sql: str) -> list[tuple]:
+        return self.conn.execute(sql).fetchall()
+
+    def replace_quality(self, month: Month, tables: dict[str, list[tuple]]) -> LoadResult:
+        """The three quality tables of one month, replaced in one transaction."""
+        deleted = loaded = 0
+        self.conn.execute("BEGIN TRANSACTION")
+        try:
+            for table, rows in tables.items():
+                names = [name for name, _ in QUALITY_TABLES[table]]
+                deleted += self.conn.execute(f"DELETE FROM raw.{table} WHERE year = ? AND month = ?",
+                                             [month.year, month.month]).fetchone()[0]
+                if rows:
+                    self.conn.executemany(f"INSERT INTO raw.{table} ({', '.join(names)}) "
+                                          f"VALUES ({', '.join('?' for _ in names)})", [list(r) for r in rows])
+                loaded += len(rows)
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
+        return LoadResult("raw.quality_summary", month.label, deleted, loaded)
+
 
 def open_warehouse(settings: Settings) -> SnowflakeWarehouse | DuckDBWarehouse:
     return DuckDBWarehouse(settings) if settings.warehouse == "duckdb" else SnowflakeWarehouse()
@@ -294,9 +369,85 @@ def load_quarantine(settings: Settings, warehouse: Any, month: Month) -> LoadRes
     return warehouse.replace_quarantine(month, parquet, parquet_rows(parquet))
 
 
+# --- quality and schema reports -----------------------------------------------------------------------
+def schema_findings(schema: dict[str, Any]) -> list[tuple[str, str | None, str | None, int | None]]:
+    """(finding, column, detail, affected values) of one month, from its schema report. A file that matches the
+    contract gives one 'none' row, so "no findings" and "no report" are never the same thing."""
+    found: list[tuple[str, str | None, str | None, int | None]] = []
+    derived = schema.get("derived") or {}
+    for target, inputs in (derived.get("inputs") or {}).items():
+        found.append(("derived_zone", target, ", ".join(inputs), None))
+    for target, lost in (derived.get("unresolved") or {}).items():
+        found.append(("unresolved_264", target, None, int(lost.get("unknown_264", 0))))
+        found.append(("unresolved_265", target, None, int(lost.get("outside_nyc_265", 0))))
+    found += [("value_mapped", column, None, None) for column in schema.get("value_mapped") or []]
+    found += [("missing_optional", column, None, None) for column in schema.get("missing_optional") or []]
+    found += [("new_column", column, None, None) for column in schema.get("new_columns") or []]
+    found += [("type_mismatch", column, change, None) for column, change in (schema.get("type_mismatches") or {}).items()]
+    found += [("cast_failure", column, None, int(n)) for column, n in (schema.get("cast_failures") or {}).items()]
+    found += [("null_violation", column, None, int(n)) for column, n in (schema.get("null_violations") or {}).items()]
+    return found or [("none", None, None, None)]
+
+
+def quality_tables(settings: Settings, month: Month) -> dict[str, list[tuple]] | None:
+    """Rows of the three quality tables for one month, from the local control database (None = no report)."""
+    from src.calidad import load_rules
+    from src.interpretacion import quality_from_control, rule_descriptions
+
+    quality = quality_from_control(settings, month.label)
+    if quality is None:
+        return None
+    params, rules = load_rules()
+    values = {**params, "year": month.year, "month": month.month}
+    descriptions = rule_descriptions()
+    key = (month.year, month.month)
+    source_file = Path(str(quality.ingestion.get("file") or "")).name or None
+    file_rows = quality.ingestion.get("row_count")
+    return {
+        "quality_summary": [(*key, month.label, source_file, None if file_rows is None else int(file_rows), quality.rows_read,
+                             quality.rows_accepted, quality.rows_quarantined, quality.rows_with_warnings,
+                             quality.reconciled, quality.schema.get("status"), quality.run_id)],
+        "quality_rules": [(*key, rule.id, rule.severity, descriptions.get(rule.id) or rule.description,
+                           rule.threshold.format(**values), quality.rules.get(rule.id, 0), quality.run_id) for rule in rules],
+        "schema_findings": [(*key, i, *finding, quality.run_id) for i, finding in enumerate(
+            schema_findings(quality.schema) if quality.schema else [], start=1)],
+    }
+
+
+def unpublished_quality(settings: Settings, warehouse: Any) -> list[Month]:
+    """Months loaded in this warehouse whose quality report is in the control database but not in RAW.QUALITY_*
+    (loaded by an earlier version of the pipeline). A report that does not match the loaded rows is left out."""
+    if not settings.control_db.exists():
+        return []
+    loaded = dict(warehouse.query("SELECT mes, rows_loaded FROM raw.load_log "
+                                  "WHERE lower(target_table) = 'raw.yellow_trips' ORDER BY loaded_at"))  # last load wins
+    published = {row[0] for row in warehouse.query("SELECT mes FROM raw.quality_summary")}
+    con = connect_duckdb_file(settings.control_db, read_only=True)
+    try:
+        reported = dict(con.execute("SELECT mes, rows_accepted FROM quality_summary ORDER BY created_at").fetchall())
+    except duckdb.CatalogException:  # no quality run yet
+        return []
+    finally:
+        con.close()
+    return [Month.parse(mes) for mes, rows in sorted(reported.items())
+            if mes not in published and int(loaded.get(mes, -1)) == int(rows)]
+
+
+def load_quality(settings: Settings, warehouse: Any, months: list[Month]) -> list[LoadResult]:
+    """Publishes the quality and schema reports of these months, and of any loaded month that never had them."""
+    results = []
+    for month in [*months, *(m for m in unpublished_quality(settings, warehouse) if m not in months)]:
+        tables = quality_tables(settings, month)
+        if tables is None:
+            log.info("quality report %s: none in the control database", month)
+            continue
+        results.append(warehouse.replace_quality(month, tables))
+    return results
+
+
 def load_months(
     settings: Settings, months: list[Month], warehouse: Any | None = None, *, include_zones: bool = True,
-    include_trips: bool = True, include_quarantine: bool = True,
+    include_trips: bool = True, include_quarantine: bool = True, include_quality: bool = True,
 ) -> list[LoadResult]:
     own = warehouse is None
     warehouse = warehouse or open_warehouse(settings)
@@ -310,6 +461,8 @@ def load_months(
                 results.append(load_month(settings, warehouse, month))
             if include_quarantine:
                 results.append(load_quarantine(settings, warehouse, month))
+        if include_quality and months:
+            results += load_quality(settings, warehouse, months)
         for r in results:
             log.info("load %s %s: deleted=%s loaded=%s", r.table, r.mes, f"{r.rows_deleted:,}", f"{r.rows_loaded:,}")
             labels = {"table": r.table.lower(), "warehouse": settings.warehouse}
