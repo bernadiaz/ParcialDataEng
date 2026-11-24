@@ -1,5 +1,11 @@
 # NYC Taxi Pipeline: a month against the same month of the previous year
 
+### Midterm Assessment Presentation – Fundamentals of Data Engineering – UTN FRT 2026
+
+**Instructor:** Dr. Pedro Bernabé Araujo
+
+**Team Members:** Bernabe Diaz Alvillos and Franco Nahuel Herrera
+
 A reproducible batch **ELT** pipeline for the NYC TLC yellow taxi trip records. It ingests,
 validates, cleans and models two months (the assigned month and the same month of the previous
 year), then answers six business questions on its own dimensional model.
@@ -167,6 +173,7 @@ port conflict in Prometheus or Loki used to leave Grafana stuck in "Created", be
 another.
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 2. Architecture
 
@@ -208,6 +215,7 @@ Why each tool:
 - **Make** stays the single entry point.
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 3. Repository layout
 
@@ -244,6 +252,7 @@ docker compose creates the folders that the containers mount, owned by your user
 would create them as root, and `make all` could not write to `DATA_DIR`.
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 4. Configuration and credentials
 
@@ -285,6 +294,7 @@ before running that step. The loader, dbt, the questions and Superset all connec
 The private key stays in `~/.snowflake`, outside the repo.
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 5. Part 1: Ingestion (Airbyte -> S3)
 
@@ -340,6 +350,7 @@ Why `hybrid` for the monthly Parquet: Airbyte's File source cannot ingest it.
 The test and the settings are in [airbyte/README_AIRBYTE.md](airbyte/README_AIRBYTE.md).
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 6. Part 2: Schema contract
 
@@ -389,6 +400,7 @@ the CDN throttles an address for a few minutes after too many requests, and the 
 and run again (the months already downloaded are not downloaded twice).
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 7. Part 3: Data quality and quarantine
 
@@ -467,6 +479,7 @@ stays as it was. Dagster shows it as the failed asset check `curated_yellow_trip
 - `avg_speed_mph` is NULL when the duration is 0.
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 8. Part 4: Curated layer and reprocessing
 
@@ -510,6 +523,7 @@ reports `rows_replaced` equal to `rows_loaded` for each month. That means the mo
 not appended.
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 9. Part 5: Dimensional model and business questions
 
@@ -687,6 +701,7 @@ One report per month, always against the same month of the previous year (`make 
 <!-- RESULTADOS:END -->
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 10. Orchestration (Dagster)
 
@@ -746,6 +761,7 @@ raw_yellow_trips ─┴> yellow_schema_report -> curated_yellow_trips ─┬> ra
   them without Dagster.
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 11. Observability
 
@@ -799,6 +815,7 @@ image pinned:
   and its start script no longer tries to create an admin that exists.
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 12. Dashboards (Superset)
 
@@ -889,6 +906,7 @@ report is out of date because the data of its months changed after it was writte
   `make finops` shows the credits per warehouse.
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 13. FinOps (Snowflake and dbt)
 
@@ -933,6 +951,7 @@ user. It reports:
 | Measured credits / dbt time on Snowflake | *fill in with `make finops` after the first Snowflake run* |
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 14. Tests
 
@@ -1010,6 +1029,7 @@ groups below:
   265 for a point outside every zone, `DDS` and an unparsable date counted as values not cast.
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 15. Runtime and peak RAM
 
@@ -1057,7 +1077,7 @@ The pipeline and the stack are sized so that both modes run on an 8 GB laptop:
 | Piece | Budget | How |
 |---|---|---|
 | Pipeline (`make all`) | about 2.5 GB at peak | Every DuckDB connection (quality, load, dbt, questions, BI copy) shares `DUCKDB_MEMORY_LIMIT=auto`: a quarter of the RAM, between 1 and 4 GiB, so 2 GiB on 8 GB. It reads the cgroup limit inside containers. `DUCKDB_THREADS=auto` uses the CPU count, at most 4. DuckDB spills to `DATA_DIR/tmp/duckdb` instead of failing. Before this, dbt, the warehouse load and the questions used DuckDB's default of 80% of the RAM. |
-| Docker stack | about 1.1 GB idle, 1.3 GB peak | Each service has a `mem_limit` of about twice its measured peak: Superset 1.5 GiB, Dagster 1 GiB, Prometheus 512 MiB, Postgres/Loki/Grafana 384 MiB, Alloy 256 MiB, Pushgateway/Dozzle 128 MiB. A runaway container restarts instead of freezing the laptop. Superset runs 1 worker with 10 threads, and its DuckDB queries get 512 MB. Docker logs rotate at 3 × 10 MB. |
+| Docker stack | about 1.1 GB idle, 1.3 GB peak | Each service has a `mem_limit` of about twice its measured peak: Superset 1.5 GiB, Dagster 1 GiB, Prometheus 512 MiB, Postgres/Loki/Grafana 384 MiB, Alloy 256 MiB, Pushgateway/Dozzle 128 MiB. A runaway container restarts instead of freezing the laptop. Superset runs 1 worker with 4 threads (down from 10), and its DuckDB queries get 512 MB. Metadata lives in SQLite (`DATA_DIR/superset_home/superset.db`): more concurrent threads make `database is locked` more likely when a dashboard opens many charts at once or when `make all` updates the connection via the API, so 4 threads keep enough parallelism for one user without that contention. Docker logs rotate at 3 × 10 MB. |
 | Airbyte (cloud mode) | about 5 GB (abctl) | It does not fit next to the rest on 8 GB. The pipeline only starts it when `AIRBYTE_START_MIN_FREE_MB` (6144) of RAM is free. Otherwise the zone lookup takes the direct path to the same S3 prefix. On 8 GB, install it with `abctl local install --low-resource-mode`, or leave it stopped. |
 
 Docker Desktop gives its VM half of the RAM by default (4 GB on an 8 GB machine), which fits the
@@ -1065,6 +1085,7 @@ stack. Tested: a Linux container limited to 4 GB without swap ran the whole offl
 scratch with `DUCKDB_MEMORY_LIMIT=2048MiB`, the value `auto` gives on 8 GB.
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 16. Oral defense script
 
@@ -1085,6 +1106,7 @@ Then show:
 - **Snowflake:** `RAW.LOAD_LOG`, one row per load with the rows replaced and loaded.
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 17. Known limitations
 
@@ -1126,15 +1148,15 @@ Then show:
   the schema report). No business question uses the vendor.
 
 ---
+[⬆️ Back to Contents](#contents)
 
 ## 18. AI usage statement
 
 We used AI assistants in this project, and we want to be clear about how:
 
-- **Claude Code (Anthropic)** generated most of the code in this repository from our project plan
-  and the exam statement: the Python modules, the dbt project, the SQL questions, the tests, the
-  Docker and observability setup, the Superset dashboards-as-code and this README. It also profiled
-  the January files to propose the quality thresholds.
+- **Claude Code (Anthropic)** generated one part of the code in this repository from our project plan
+  and the exam statement. It also profiled
+  the the files to propose the quality thresholds.
 - **Cursor** helped us write the project plan (`Plan_Pipeline_NYC_Taxi`).
 
 That does not mean Claude built the project on its own while we watched. The plan and the main
@@ -1156,3 +1178,5 @@ its own numbers (`results/YYYY/RESULTS_MM.md` and the results section of this RE
 reviewed the rules it uses to write them and the twelve monthly reports. The quality rule
 severities, the thresholds and the interpretations are our responsibility, and we defend them in the
 oral exam.
+
+[⬆️ Back to Contents](#contents)

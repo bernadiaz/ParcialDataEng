@@ -228,10 +228,11 @@ services:
       SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:?set SUPERSET_SECRET_KEY in .env}
       SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER:-admin}
       SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD:?set SUPERSET_ADMIN_PASSWORD in .env}
-      # One gunicorn worker (the image default) with fewer threads: enough for one person opening a
-      # dashboard, and lighter on RAM. Snowflake can take a while to resume a suspended warehouse.
+      # One gunicorn worker with 4 threads (not 10): enough for one person opening a dashboard, and
+      # safer for the SQLite metadata DB (fewer database-is-locked races). Snowflake can take a while
+      # to resume a suspended warehouse.
       SERVER_WORKER_AMOUNT: "1"
-      SERVER_THREADS_AMOUNT: "10"
+      SERVER_THREADS_AMOUNT: "4"
       GUNICORN_TIMEOUT: "180"
     volumes:
       # Superset metadata (dashboards, charts, datasets, connections) in a host folder: it survives
