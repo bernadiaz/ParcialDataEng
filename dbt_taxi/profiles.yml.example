@@ -1,0 +1,25 @@
+# Copiar a profiles.yml (gitignored) o montar vía ~/.dbt/profiles.yml
+dbt_taxi:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE', 'TAXI_ROLE') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE', 'NYC_TAXI') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'WH_TAXI_DEV') }}"
+      schema: STAGING
+      threads: 2
+      client_session_keep_alive: False
+    prod:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE', 'TAXI_ROLE') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE', 'NYC_TAXI') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'WH_TAXI_RUN') }}"
+      schema: STAGING
+      threads: 2

@@ -1,0 +1,32 @@
+# Versioned Airbyte configuration for the taxi zone lookup (synced once; skipped while the hash matches).
+name: nyc-taxi-zones
+
+source:
+  name: tlc-taxi-zone-lookup
+  configuration:
+    sourceType: file
+    dataset_name: taxi_zone_lookup
+    format: csv
+    url: "https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv"
+    provider:
+      storage: HTTPS
+      user_agent: false
+
+destination:
+  name: s3-raw-zones
+  configuration:
+    destinationType: s3
+    s3_bucket_name: "{env.S3_BUCKET}"
+    s3_bucket_region: "{env.AWS_REGION}"
+    s3_bucket_path: "{env.S3_RAW_PREFIX}/zones"
+    s3_path_format: "${STREAM_NAME}/"
+    access_key_id: "{env.AIRBYTE_S3_ACCESS_KEY_ID}"
+    secret_access_key: "{env.AIRBYTE_S3_SECRET_ACCESS_KEY}"
+    format:
+      format_type: CSV
+      flattening: Root level flattening
+
+connection:
+  name: nyc-taxi-zones
+  stream: taxi_zone_lookup
+  sync_mode: full_refresh_overwrite
