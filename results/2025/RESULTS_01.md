@@ -6,19 +6,19 @@
 
 | | |
 |---|---|
-| Comando | `make all MES=2025-01 INGEST_MODE=direct WAREHOUSE=duckdb` |
-| Modo | local, sin nube: los archivos se descargan de la TLC, la calidad corre en DuckDB y el warehouse es un archivo DuckDB |
-| Consultas | marts de dbt en DuckDB |
+| Comando | `make all MES=2025-01` |
+| Modo | nube: Airbyte lleva la tabla de zonas y los archivos mensuales se copian sin cambios de la TLC a S3 (INGEST_MODE=hybrid), la calidad corre en DuckDB y el warehouse es Snowflake |
+| Consultas | marts de dbt en Snowflake |
 | Archivos de la TLC | `yellow_tripdata_2025-01.parquet` y `yellow_tripdata_2024-01.parquet` |
-| Tablero de respaldo | [`respaldo-local-2025-01`](http://localhost:8090/superset/dashboard/respaldo-local-2025-01/) en Superset |
-| Los 12 meses del año | [`respaldo-local-2025`](http://localhost:8090/superset/dashboard/respaldo-local-2025/) en Superset |
-| Corrida | `20261124T020953Z-774490`, 2026-11-24 02:14 UTC |
+| Tablero de respaldo | [`respaldo-nube-2025-01`](http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/) en Superset |
+| Los 12 meses del año | [`respaldo-nube-2025`](http://localhost:8090/superset/dashboard/respaldo-nube-2025/) en Superset |
+| Corrida | `20261124T022843Z-4dd0d7`, 2026-11-24 02:34 UTC |
 
 Las interpretaciones no son texto fijo: `src/interpretacion.py` las redacta en cada corrida a partir de los resultados de las consultas, de las consultas de contexto (`sql/contexto/`) y de los reportes de esquema y de calidad de cada archivo. Los montos están en dólares; las tarifas mayores a US$ 500 se señalan como atípicas porque ninguna regla de calidad les pone un tope. Cada bloque termina con los charts de Superset que muestran sus cifras; la última sección dice cómo se comprobó.
 
 ## Calidad de los datos y cuarentena
 
-Antes de responder las preguntas, cada archivo parquet de la TLC pasa por el contrato de esquema (`contracts/yellow_schema.yaml`) y por las reglas de calidad (`contracts/quality_rules.yaml`). Cada fila leída termina en un solo lugar: **aceptada** (capa curated, y de ahí al warehouse y a los marts) o **en cuarentena** (`<DATA_DIR>/quarantine/yellow/year=2025/month=01/` y el mismo camino para 2024, la tabla `raw.yellow_quarantine`). Una fila en cuarentena conserva sus valores originales, el archivo y el número de fila de origen (`source_file`, `source_row_number`) y las reglas de rechazo que violó (`violated_rules`). Las reglas `warning` no descartan la fila: solo la marcan en `quality_flags`. Si en algún mes `leídas = aceptadas + cuarentena` no se cumpliera, el pipeline se detiene antes de publicar ese mes.
+Antes de responder las preguntas, cada archivo parquet de la TLC pasa por el contrato de esquema (`contracts/yellow_schema.yaml`) y por las reglas de calidad (`contracts/quality_rules.yaml`). Cada fila leída termina en un solo lugar: **aceptada** (capa curated, y de ahí al warehouse y a los marts) o **en cuarentena** (`<DATA_DIR>/quarantine/yellow/year=2025/month=01/` y el mismo camino para 2024, la tabla `RAW.YELLOW_QUARANTINE`, además de una copia en `s3://<bucket>/quarantine/yellow/`). Una fila en cuarentena conserva sus valores originales, el archivo y el número de fila de origen (`source_file`, `source_row_number`) y las reglas de rechazo que violó (`violated_rules`). Las reglas `warning` no descartan la fila: solo la marcan en `quality_flags`. Si en algún mes `leídas = aceptadas + cuarentena` no se cumpliera, el pipeline se detiene antes de publicar ese mes.
 
 | mes | archivo | filas en el parquet | leídas | aceptadas | cuarentena | % cuarentena | aceptadas con warnings | reconcilia |
 |---|---|---:|---:|---:|---:|---:|---:|---|
@@ -367,20 +367,20 @@ inner join by_month as c on a.year = ${YEAR} and c.year = ${CMP_YEAR}
   - _Respaldo:_ [C3.1 Perfil del viaje: distancia, tarifa, mezcla y propina][C3.1]
 - Los promedios son frágiles: 40 viajes con tarifas mayores a US$ 500 (el mayor, de US$ 863.372,12, en 2025) alcanzan para mover el ranking de horas, la tarifa media de los aeropuertos y la tarifa media del mes, por eso se reportan también la mediana y el promedio sin tarifas mayores a US$ 500. La siguiente regla de calidad a agregar es un tope de tarifa o de tarifa por milla.
   - _Respaldo:_ [C4.1 Peso de las tarifas atípicas en los promedios][C4.1] · [C4.2 Los viajes con las tarifas más altas][C4.2] · [E2.1 Las 24 horas: volumen, ingreso por viaje, aeropuertos, distancia y atípicos][E2.1]
-- Los archivos traen cambios de formato que el pipeline absorbe sin romperse (enero 2024: no trae cbd_congestion_fee, que queda en NULL). La cuarentena es del 4,37 % y del 3,16 % de las filas leídas y los dos meses reconcilian. Las cifras salen de los marts de dbt en DuckDB (modo local) y se reproducen con `make all MES=2025-01 INGEST_MODE=direct WAREHOUSE=duckdb`.
+- Los archivos traen cambios de formato que el pipeline absorbe sin romperse (enero 2024: no trae cbd_congestion_fee, que queda en NULL). La cuarentena es del 4,37 % y del 3,16 % de las filas leídas y los dos meses reconcilian. Las cifras salen de los marts de dbt en Snowflake y se reproducen con `make all MES=2025-01`.
   - _Respaldo:_ [C5.1 Cuarentena y reconciliación][C5.1] · [C5.2 Cambios de formato de los archivos][C5.2]
 
 ## Respaldo en Superset
 
-Todas las cifras salen de las tablas `marts.ev_*` (modelos dbt de `dbt_taxi/models/evidence`), y los tableros leen esas mismas tablas. Tablero de este mes: [`respaldo-local-2025-01`](http://localhost:8090/superset/dashboard/respaldo-local-2025-01/). Los 12 meses de 2025 contra 2024: [`respaldo-local-2025`](http://localhost:8090/superset/dashboard/respaldo-local-2025/). Los enlaces funcionan con el stack levantado (`docker compose up -d`).
+Todas las cifras salen de las tablas `marts.ev_*` (modelos dbt de `dbt_taxi/models/evidence`), y los tableros leen esas mismas tablas. Tablero de este mes: [`respaldo-nube-2025-01`](http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/). Los 12 meses de 2025 contra 2024: [`respaldo-nube-2025`](http://localhost:8090/superset/dashboard/respaldo-nube-2025/). Los enlaces funcionan con el stack levantado (`docker compose up -d`).
 
 **Auditoría de las cifras:** 330 números en este reporte, 330 se ven en los charts que cita su bloque y 0 no. Las respuestas de `sql/q1..q6` coinciden con la evidencia.
 
 <!-- VERIFICACION:START - la escribe src/respaldo.py al comparar el reporte con Superset; no editar a mano -->
-**Verificación contra Superset:** coincide (2026-11-24 02:16 UTC, corrida `20261124T021601Z-5b0c2e`).
+**Verificación contra Superset:** coincide (2026-11-24 02:40 UTC, corrida `20261124T022843Z-4dd0d7`).
 
-- Tablero `respaldo-local-2025-01`: 54 de 54 charts devolvieron por la API exactamente los datos de este reporte (4.682 celdas comparadas).
-- Tablero `respaldo-local-2025`: 17 de 17 charts (6.072 celdas).
+- Tablero `respaldo-nube-2025-01`: 54 de 54 charts devolvieron por la API exactamente los datos de este reporte (4.682 celdas comparadas).
+- Tablero `respaldo-nube-2025`: 17 de 17 charts (1.122 celdas).
 - Números de este reporte: 330 de 330 se ven en los charts que cita su bloque.
 <!-- VERIFICACION:END -->
 
@@ -764,57 +764,57 @@ Cuando un número redondeado aparece en más de una celda se indica cuántas.
 
 </details>
 
-[E0.1]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E0-1
-[E0.2]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E0-2
-[E0.3]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E0-3
-[E0.4]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E0-4
-[E0.5]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E0-5
-[E0.6]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E0-6
-[E0.7]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E0-7
-[E0.8]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E0-8
-[EC.1]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-EC-1
-[EC.2]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-EC-2
-[EC.3]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-EC-3
-[EC.4]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-EC-4
-[E1.1]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E1-1
-[E1.2]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E1-2
-[E1.3]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E1-3
-[E1.4]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E1-4
-[E1.5]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E1-5
-[E1.6]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E1-6
-[E1.7]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E1-7
-[E1.8]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E1-8
-[E2.1]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E2-1
-[E2.2]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E2-2
-[E2.3]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E2-3
-[E2.4]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E2-4
-[E2.5]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E2-5
-[E3.1]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E3-1
-[E3.5]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E3-5
-[E3.3]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E3-3
-[E3.4]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E3-4
-[E3.2]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E3-2
-[E4.1]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E4-1
-[E4.2]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E4-2
-[E4.3]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E4-3
-[E4.4]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E4-4
-[E5.1]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E5-1
-[E5.2]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E5-2
-[E5.3]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E5-3
-[E5.4]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E5-4
-[E6.1]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E6-1
-[E6.2]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E6-2
-[E6.3]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E6-3
-[E6.4]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E6-4
-[E6.5]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E6-5
-[E6.6]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-E6-6
-[C1.1]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-C1-1
-[C1.2]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-C1-2
-[C1.3]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-C1-3
-[C2.1]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-C2-1
-[C2.2]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-C2-2
-[C3.1]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-C3-1
-[C4.1]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-C4-1
-[C4.2]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-C4-2
-[C5.1]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-C5-1
-[C5.2]: http://localhost:8090/superset/dashboard/respaldo-local-2025-01/#CHART-C5-2
+[E0.1]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E0-1
+[E0.2]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E0-2
+[E0.3]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E0-3
+[E0.4]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E0-4
+[E0.5]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E0-5
+[E0.6]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E0-6
+[E0.7]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E0-7
+[E0.8]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E0-8
+[EC.1]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-EC-1
+[EC.2]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-EC-2
+[EC.3]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-EC-3
+[EC.4]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-EC-4
+[E1.1]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E1-1
+[E1.2]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E1-2
+[E1.3]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E1-3
+[E1.4]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E1-4
+[E1.5]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E1-5
+[E1.6]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E1-6
+[E1.7]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E1-7
+[E1.8]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E1-8
+[E2.1]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E2-1
+[E2.2]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E2-2
+[E2.3]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E2-3
+[E2.4]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E2-4
+[E2.5]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E2-5
+[E3.1]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E3-1
+[E3.5]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E3-5
+[E3.3]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E3-3
+[E3.4]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E3-4
+[E3.2]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E3-2
+[E4.1]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E4-1
+[E4.2]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E4-2
+[E4.3]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E4-3
+[E4.4]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E4-4
+[E5.1]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E5-1
+[E5.2]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E5-2
+[E5.3]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E5-3
+[E5.4]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E5-4
+[E6.1]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E6-1
+[E6.2]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E6-2
+[E6.3]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E6-3
+[E6.4]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E6-4
+[E6.5]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E6-5
+[E6.6]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-E6-6
+[C1.1]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-C1-1
+[C1.2]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-C1-2
+[C1.3]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-C1-3
+[C2.1]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-C2-1
+[C2.2]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-C2-2
+[C3.1]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-C3-1
+[C4.1]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-C4-1
+[C4.2]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-C4-2
+[C5.1]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-C5-1
+[C5.2]: http://localhost:8090/superset/dashboard/respaldo-nube-2025-01/#CHART-C5-2
