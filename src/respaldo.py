@@ -74,7 +74,8 @@ def parametros(grafico: Grafico) -> dict[str, Any]:
     filtros = [where(ev.filtro_sql(grafico.filtro))] if grafico.filtro else []
     if grafico.tipo == "tabla":
         largo = grafico.codigo in {"E1.8", "A15"}
-        variaciones = [c for c in grafico.columnas if c.startswith("variacion") or c == "cambio_pp"]
+        # Solo porcentajes: en "variacion" se mezclan unidades (viajes, USD, puntos) y el color no diría nada.
+        variaciones = [c for c in grafico.columnas if (c.startswith("variacion") and c.endswith("_pct")) or c == "cambio_pp"]
         return {
             "viz_type": "table", "query_mode": "raw", "all_columns": list(grafico.columnas), "adhoc_filters": filtros,
             "order_by_cols": [json.dumps([c, asc]) for c, asc in grafico.orden], "row_limit": 10000, "page_length": 50 if largo else 0,
@@ -96,10 +97,18 @@ def parametros(grafico: Grafico) -> dict[str, Any]:
         "show_legend": True, "legendType": "scroll", "legendOrientation": "top", "rich_tooltip": True, "tooltipTimeFormat": "smart_date",
         "x_axis_title": grafico.eje_x, "x_axis_title_margin": 30, "y_axis_title": grafico.eje_y, "y_axis_title_margin": 50,
         "y_axis_title_position": "Left", "y_axis_format": formatos.get("y", "SMART_NUMBER"), "xAxisForceCategorical": True,
-        "color_scheme": "supersetColors", "markerEnabled": linea, "x_axis_sort_asc": True, "show_value": not linea,
+        "color_scheme": "supersetColors", "markerEnabled": linea, "x_axis_sort_asc": True, "show_value": grafico.valores,
+        # Primero el mes del reporte: "Mes..." antes que "Mismo mes..." y, con un período por serie, 2025-01 antes que 2024-01.
+        "sort_series_type": "name", "sort_series_ascending": not grafico.serie,
     }
+    if grafico.horizontal:
+        params |= {"orientation": "horizontal", "x_axis_title": "", "y_axis_title": ""}
     if grafico.orden and grafico.orden[0][0].startswith("puesto"):  # zonas: de mayor a menor, no alfabético
-        params |= {"x_axis_sort": grafico.metricas[0][0], "x_axis_sort_asc": False}
+        ascendente = grafico.horizontal  # a lo ancho, Superset dibuja la primera barra abajo: así la mayor queda arriba
+        if len(grafico.metricas) == 1:
+            params |= {"x_axis_sort": grafico.metricas[0][0], "x_axis_sort_asc": ascendente}
+        else:  # con dos series Superset ordena por el total de las dos
+            params |= {"x_axis_sort_series": "sum", "x_axis_sort_series_ascending": ascendente}
     return params
 
 
@@ -192,7 +201,7 @@ def tablero_mes(settings: Settings, mes: Month, evidencia: Evidencia, ids: dict[
     reporte = resultados.results_file(mes)
     titulo = f"Taxi NYC | Respaldo {mes_es(mes)} vs {mes_es(mes.comparison)} ({ev.motor(settings)})"
     p = Posicion(titulo)
-    p.texto("GRID_ID", encabezado_mes(settings, mes, evidencia, reporte), 18)
+    p.texto("GRID_ID", encabezado_mes(settings, mes, evidencia, reporte), 17)
     p.pestanas()
     propias = ev.conclusiones_de(reporte) if resultados.has_figures(reporte) and ev.motor_de(reporte) == ev.motor(settings) else []
     for clave, nombre in ev.PESTANAS:
@@ -206,7 +215,7 @@ def tablero_mes(settings: Settings, mes: Month, evidencia: Evidencia, ids: dict[
             if texto is None:
                 texto = ("_El reporte de este mes no tiene esta conclusión._" if propias else
                          "_La conclusión aparece acá cuando se genera el reporte de este mes._")
-            p.texto(tab, f"**Conclusión {grupo[1:]}.** {texto}", 10 + 4 * (len(texto) // 160 + 1))
+            p.texto(tab, f"**Conclusión {grupo[1:]}.** {texto}", 7 + 3 * (len(texto) // 150 + 1))
             p.charts(tab, [g for g in graficos if g.codigo.split(".")[0] == grupo], ids)
     return {"slug": ev.slug_mes(settings, mes), "titulo": titulo, "posicion": p.pos, "colores": {mes.label: ASSIGNED_COLOR,
             mes.comparison.label: COMPARISON_COLOR}, "filtro": ("Mes del reporte", "mes", mes.label), "graficos": ev.CATALOGO}
@@ -244,32 +253,36 @@ def encabezado_anio(settings: Settings, anio: int, completo: Evidencia, por_mes:
     """Los 12 meses del año: tablero, reporte, variación y estado. Un mes sin datos se dice, nunca se completa."""
     motor, hoy = ev.motor(settings), datetime.now(timezone.utc)
     cobertura = {str(r["mes"]): r for r in completo.tablas.get("ev_cobertura", [])}
+
+    def fila(*celdas: str) -> str:  # las tablas de Markdown de Superset no separan sus columnas: se separan con espacios
+        return "| " + " | ".join(f"{celda}&nbsp;&nbsp;&nbsp;" for celda in celdas) + " |"
+
     lineas = [f"### Los 12 meses de {anio} contra los mismos meses de {anio - 1}",
               f"Cada fila es una comparación con su tablero y su reporte (`results/{anio}/RESULTS_MM.md`). Se muestran los datos cargados en "
               f"{'la copia local de DuckDB' if motor == 'local' else 'Snowflake'}; un mes que falta no se estima.", "",
-              "| mes | comparación | viajes | recaudación | tablero | reporte |", "|---|---|---:|---:|---|---|"]
+              fila("mes", "comparación", "viajes", "recaudación", "tablero", "reporte"), "|---|---|---:|---:|---|---|"]
     for numero in range(1, 13):
         mes = Month(anio, numero)
         evidencia = por_mes.get(mes.label)
         if evidencia is not None and evidencia.existe:
             slug = ev.slug_mes(settings, mes)
-            lineas.append(f"| {MESES[numero - 1]} | {mes} vs {mes.comparison} | {signo(evidencia.indicador('viajes')['variacion_pct'])} | "
-                          f"{signo(evidencia.indicador('recaudacion')['variacion_pct'])} | [{slug}](/superset/dashboard/{slug}/) | "
-                          f"`RESULTS_{numero:02d}.md`: {estado_reporte(mes, evidencia).texto(motor)} |")
+            lineas.append(fila(MESES[numero - 1], f"{mes} vs {mes.comparison}", signo(evidencia.indicador("viajes")["variacion_pct"]),
+                               signo(evidencia.indicador("recaudacion")["variacion_pct"]), f"[{slug}](/superset/dashboard/{slug}/)",
+                               f"`RESULTS_{numero:02d}.md`: {estado_reporte(mes, evidencia).texto(motor)}"))
             continue
         if (anio, numero) > (hoy.year, hoy.month):
             motivo = "mes futuro"
         else:
             estado = str(cobertura.get(mes.label, {}).get("estado") or "mes sin cargar")
             motivo = f"{estado} (`make all {ev.argumentos_make(settings, mes)}`)"
-        lineas.append(f"| {MESES[numero - 1]} | {mes} vs {mes.comparison} | sin datos | sin datos | - | {motivo} |")
+        lineas.append(fila(MESES[numero - 1], f"{mes} vs {mes.comparison}", "sin datos", "sin datos", "-", motivo))
     return "\n".join(lineas)
 
 
 def tablero_anio(settings: Settings, anio: int, completo: Evidencia, por_mes: dict[str, Evidencia], ids: dict[str, int]) -> dict[str, Any]:
     titulo = f"Taxi NYC | Los 12 meses de {anio} vs {anio - 1} ({ev.motor(settings)})"
     p = Posicion(titulo)
-    p.texto("GRID_ID", encabezado_anio(settings, anio, completo, por_mes), 70)
+    p.texto("GRID_ID", encabezado_anio(settings, anio, completo, por_mes), 54)
     p.pestanas()
     for clave, nombre in ev.PESTANAS_ANUALES:
         p.charts(p.pestana(clave, nombre), [g for g in ev.ANUALES if g.pestana == clave], ids)

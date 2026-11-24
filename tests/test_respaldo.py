@@ -200,7 +200,7 @@ def test_the_year_dashboard_names_the_twelve_months_and_what_is_missing(settings
     respaldo.build(settings, FEB)
     position = json.loads(superset.dashboard("respaldo-local-2025")["position_json"])
     header = next(v["meta"]["code"] for v in position.values() if isinstance(v, dict) and v.get("type") == "MARKDOWN")
-    rows = [line for line in header.splitlines() if re.match(r"\| [a-z]+ \| 2025-", line)]
+    rows = [line for line in header.splitlines() if re.match(r"\| [a-z]+&nbsp;.* 2025-", line)]
     assert len(rows) == 12
     assert "respaldo-local-2025-02" in rows[1] and "al día" in rows[1] and "+20,0 %" in rows[1]
     assert "sin datos" in rows[2] and "make all MES=2025-03" in rows[2]
