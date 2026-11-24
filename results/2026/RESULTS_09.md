@@ -379,7 +379,7 @@ Todas las cifras salen de las tablas `marts.ev_*` (modelos dbt de `dbt_taxi/mode
 **Auditoría de las cifras:** 321 números en este reporte, 321 se ven en los charts que cita su bloque y 0 no. Las respuestas de `sql/q1..q6` coinciden con la evidencia.
 
 <!-- VERIFICACION:START - la escribe src/respaldo.py al comparar el reporte con Superset; no editar a mano -->
-**Verificación contra Superset:** coincide (2026-11-24 03:09 UTC, corrida `20261124T030441Z-aada0b`).
+**Verificación contra Superset:** coincide (2026-11-24 03:13 UTC, corrida `20261124T031219Z-440acd`).
 
 - Tablero `respaldo-local-2026-09`: 58 de 58 charts devolvieron por la API exactamente los datos de este reporte (4.804 celdas comparadas).
 - Tablero `respaldo-local-2026`: 17 de 17 charts (4.587 celdas).

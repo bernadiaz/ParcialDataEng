@@ -880,6 +880,8 @@ report is out of date because the data of its months changed after it was writte
   other dashboards.
 - **Superset off or not ready.** The report is written anyway, and says that it was not compared with Superset yet and which
   command does it. The pipeline waits for Superset if it is still starting (`SUPERSET_WAIT_SECONDS`, 900 by default).
+- **Conclusions next to their charts.** A dashboard shows the conclusions of the report only when all the figures of the report are
+  the ones of its data, wherever the report was written; otherwise it says that the month has to be run again.
 - **Months that are missing** are named, never filled in: the year dashboard lists the 12 months with their state, and only a
   month with both years loaded gets a dashboard.
 - **Cost in cloud mode.** The evidence tables are rebuilt from the monthly aggregates (a few thousand rows), and the
@@ -934,7 +936,7 @@ user. It reports:
 
 ## 14. Tests
 
-`make test` runs 140 tests on synthetic data, with no cloud account needed (the 2009-2010 schema test
+`make test` runs 141 tests on synthetic data, with no cloud account needed (the 2009-2010 schema test
 installs DuckDB's spatial extension the first time, and is skipped without network). Besides the
 groups below:
 - `tests/test_stack.py` checks the two-command run: the Dagster history goes to the Postgres of
